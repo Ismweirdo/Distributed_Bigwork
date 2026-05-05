@@ -1,0 +1,27 @@
+# Maven
+target/
+*.jar
+*.war
+*.class
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+chatroom-server/data/
+
+# Logs
+*.log
