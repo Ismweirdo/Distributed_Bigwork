@@ -3,33 +3,40 @@
     <!-- Left Sidebar -->
     <div class="sidebar">
       <div class="sidebar-header">
-        <div class="user-info">
-          <span class="nickname">{{ userStore.nickname }}</span>
-          <el-dropdown trigger="click" @command="handleUserCommand">
-            <span class="el-dropdown-link">
-              <el-icon><ArrowDown /></el-icon>
-            </span>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+      <div class="user-info">
+        <div class="user-avatar">{{ (userStore.nickname || userStore.username || '?')[0] }}</div>
+        <div class="user-details">
+          <div class="nickname">{{ userStore.nickname || userStore.username }}</div>
+          <div class="status-indicator">
+            <span class="status-dot"></span>
+            <span>在线</span>
+          </div>
         </div>
-        <div class="header-actions">
-          <el-badge :value="contactStore.pendingRequests.length" :hidden="!contactStore.hasPendingRequests">
-            <el-button size="small" @click="openFriendRequests" circle>
-              <el-icon><UserFilled /></el-icon>
-            </el-button>
-          </el-badge>
-          <el-button size="small" @click="showAddFriend = true" circle>
-            <el-icon><Plus /></el-icon>
-          </el-button>
-          <el-button size="small" @click="showCreateGroup = true" circle>
-            <el-icon><Message /></el-icon>
-          </el-button>
-        </div>
+        <el-dropdown trigger="click" @command="handleUserCommand">
+          <span class="dropdown-trigger">
+            <el-icon><ArrowDown /></el-icon>
+          </span>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
+      <div class="header-actions">
+        <el-badge :value="contactStore.pendingRequests.length" :hidden="!contactStore.hasPendingRequests">
+          <button class="action-btn" @click="openFriendRequests">
+            <el-icon><UserFilled /></el-icon>
+          </button>
+        </el-badge>
+        <button class="action-btn" @click="showAddFriend = true">
+          <el-icon><Plus /></el-icon>
+        </button>
+        <button class="action-btn" @click="showCreateGroup = true">
+          <el-icon><Message /></el-icon>
+        </button>
+      </div>
+    </div>
       <ContactList @select="onSelectContact" @group-info="onGroupInfo" />
     </div>
 
@@ -41,8 +48,11 @@
         :targetName="activeChat.name"
         @back="activeChat = null" />
       <div v-else class="no-chat">
-        <el-icon :size="80" color="#ddd"><ChatDotRound /></el-icon>
-        <p>选择一个联系人开始聊天</p>
+        <div class="no-chat-icon">
+          <el-icon :size="64" color="var(--primary-color)"><ChatDotRound /></el-icon>
+        </div>
+        <div class="no-chat-title">选择一个联系人开始聊天</div>
+        <div class="no-chat-subtitle">您可以从左侧列表中选择好友或群聊</div>
       </div>
     </div>
 
@@ -58,12 +68,18 @@
         暂无待处理的好友申请
       </div>
       <div v-for="req in contactStore.pendingRequests" :key="req.id" class="request-item">
-        <span>{{ req.nickname }} ({{ req.username }})</span>
-        <div>
-          <el-button type="primary" size="small" @click="handleAccept(req.friendId)">接受</el-button>
-          <el-button size="small" @click="handleReject(req.friendId)">拒绝</el-button>
+          <div class="request-info">
+            <div class="request-avatar">{{ (req.nickname || req.username)[0] }}</div>
+            <div>
+              <div class="request-name">{{ req.nickname || req.username }}</div>
+              <div class="request-username">@{{ req.username }}</div>
+            </div>
+          </div>
+          <div class="request-actions">
+            <el-button type="primary" size="small" @click="handleAccept(req.friendId)">接受</el-button>
+            <el-button size="small" @click="handleReject(req.friendId)">拒绝</el-button>
+          </div>
         </div>
-      </div>
     </el-dialog>
 
     <!-- Group Info Dialog -->
@@ -80,6 +96,7 @@ import { useChatStore } from '../store/chat'
 import { connectWebSocket, disconnectWebSocket, addMessageHandler, removeMessageHandler, addPresenceHandler, removePresenceHandler, subscribeGroupMessages } from '../utils/websocket'
 import { acceptFriendRequest, rejectFriendRequest } from '../api/friend'
 import { ElMessage } from 'element-plus'
+import { ArrowDown, UserFilled, Plus, Message, ChatDotRound } from '@element-plus/icons-vue'
 import ContactList from '../components/ContactList.vue'
 import ChatWindow from '../components/ChatWindow.vue'
 import AddFriendDialog from '../components/AddFriendDialog.vue'
@@ -207,14 +224,232 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.chat-layout { display: flex; height: 100vh; }
-.sidebar { width: 320px; background: #f5f5f5; display: flex; flex-direction: column; border-right: 1px solid #e0e0e0; }
-.sidebar-header { padding: 16px; background: #fff; border-bottom: 1px solid #e0e0e0; }
-.user-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.nickname { font-size: 18px; font-weight: 600; }
-.header-actions { display: flex; gap: 8px; }
-.chat-area { flex: 1; display: flex; flex-direction: column; }
-.no-chat { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #bbb; gap: 16px; font-size: 16px; }
-.request-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; }
-.empty-center { text-align: center; color: #999; padding: 20px; }
+.chat-layout {
+  display: flex;
+  height: 100vh;
+  background: var(--bg-secondary);
+}
+
+.sidebar {
+  width: 360px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+}
+
+.sidebar-header {
+  padding: 20px 24px;
+  background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+  color: white;
+}
+
+.user-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.user-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 600;
+  backdrop-filter: blur(10px);
+}
+
+.user-details {
+  flex: 1;
+  margin-left: 12px;
+}
+
+.nickname {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  background: #22c55e;
+  border-radius: 50%;
+  margin-right: 6px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.1);
+  }
+}
+
+.dropdown-trigger {
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.15);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.dropdown-trigger:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.action-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.action-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+  transform: translateY(-2px);
+}
+
+.action-btn:active {
+  transform: translateY(0);
+}
+
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+
+.no-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  color: var(--text-muted);
+  gap: 20px;
+  font-size: 16px;
+}
+
+.no-chat-icon {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: icon-float 3s ease-in-out infinite;
+}
+
+@keyframes icon-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.no-chat-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.no-chat-subtitle {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.request-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-light);
+  transition: all 0.2s ease;
+}
+
+.request-item:hover {
+  background: var(--bg-secondary);
+}
+
+.request-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.request-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+}
+
+.request-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.request-username {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.request-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.empty-center {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 40px 20px;
+}
+
+:deep(.el-dropdown-menu__item) {
+  color: var(--text-primary);
+}
+
+:deep(.el-dropdown-menu__item:hover) {
+  background: var(--bg-hover);
+}
 </style>

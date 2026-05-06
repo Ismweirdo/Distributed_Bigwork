@@ -2,36 +2,59 @@
   <div class="contact-list">
     <!-- Search -->
     <div class="search-box">
-      <el-input v-model="search" placeholder="搜索" prefix-icon="Search" size="small" clearable />
+      <el-input v-model="search" placeholder="搜索好友或群聊" prefix-icon="Search" size="small" clearable />
     </div>
 
     <!-- Tabs -->
     <el-tabs v-model="activeTab" class="contact-tabs">
       <el-tab-pane label="好友" name="friends">
-        <div v-if="contactStore.friendList.length === 0" class="empty-hint">暂无好友，点击 + 添加好友</div>
+        <div v-if="contactStore.friendList.length === 0" class="empty-hint">
+          <div class="empty-hint-icon">
+            <el-icon :size="28" color="var(--text-muted)"><User /></el-icon>
+          </div>
+          <div class="empty-hint-title">暂无好友</div>
+          <div class="empty-hint-desc">点击 + 按钮添加好友</div>
+        </div>
         <div v-for="friend in filteredFriends" :key="friend.friendId"
           class="contact-item" :class="{ active: isActive('private', friend.friendId) }"
           @click="selectContact('private', friend.friendId, friend.nickname || friend.username)">
-          <el-badge :is-dot="friend.status === 1" class="avatar-badge" type="success" :offset="[0, 36]">
-            <el-avatar :size="40">{{ (friend.nickname || friend.username)[0] }}</el-avatar>
-          </el-badge>
+          <div class="avatar-wrapper">
+            <el-avatar class="contact-avatar">{{ (friend.nickname || friend.username)[0] }}</el-avatar>
+            <div class="status-badge" :class="{ online: friend.status === 1, offline: friend.status !== 1 }"></div>
+          </div>
           <div class="contact-info">
             <div class="contact-name">{{ friend.nickname || friend.username }}</div>
-            <div class="contact-status">{{ friend.status === 1 ? '在线' : '离线' }}</div>
+            <div class="contact-status">
+              <span v-if="friend.status === 1" style="color: #22c55e">在线</span>
+              <span v-else>离线</span>
+            </div>
           </div>
         </div>
       </el-tab-pane>
 
       <el-tab-pane label="群聊" name="groups">
-        <div v-if="filteredGroups.length === 0 && !search" class="empty-hint">暂无群聊，点击消息图标创建群</div>
+        <div v-if="filteredGroups.length === 0 && !search" class="empty-hint">
+          <div class="empty-hint-icon">
+            <el-icon :size="28" color="var(--text-muted)"><Message /></el-icon>
+          </div>
+          <div class="empty-hint-title">暂无群聊</div>
+          <div class="empty-hint-desc">点击消息图标创建群聊</div>
+        </div>
         <div v-for="group in filteredGroups" :key="group.id"
           class="contact-item" :class="{ active: isActive('group', group.id) }"
           @click="selectContact('group', group.id, group.name)"
           @dblclick="emit('groupInfo', group)">
-          <el-avatar :size="40">{{ group.name[0] }}</el-avatar>
+          <div class="avatar-wrapper">
+            <el-avatar class="contact-avatar" style="background: linear-gradient(135deg, #f59e0b, #ef4444);">
+              {{ group.name[0] }}
+            </el-avatar>
+          </div>
           <div class="contact-info">
             <div class="contact-name">{{ group.name }}</div>
-            <div class="contact-status">{{ group.memberCount }} 人</div>
+            <div class="contact-status">
+              <span class="group-icon">{{ group.memberCount }}</span>
+              <span>{{ group.memberCount }} 位成员</span>
+            </div>
           </div>
         </div>
       </el-tab-pane>
@@ -42,6 +65,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useContactStore } from '../store/contact'
+import { User, Message } from '@element-plus/icons-vue'
 
 const emit = defineEmits(['select', 'groupInfo'])
 const contactStore = useContactStore()
@@ -80,56 +104,161 @@ function selectContact(type, id, name) {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--bg-primary);
 }
+
 .search-box {
-  padding: 12px 16px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border-light);
 }
+
+.search-box :deep(.el-input__wrapper) {
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  border: none;
+}
+
+.search-box :deep(.el-input__inner) {
+  background: transparent;
+}
+
 .contact-tabs {
   flex: 1;
   display: flex;
   flex-direction: column;
 }
+
+.contact-tabs :deep(.el-tabs__header) {
+  padding: 0 16px;
+  margin-bottom: 0;
+}
+
+.contact-tabs :deep(.el-tabs__nav) {
+  padding: 12px 0;
+}
+
 .contact-tabs :deep(.el-tabs__content) {
   flex: 1;
   overflow-y: auto;
 }
+
 .contact-item {
   display: flex;
   align-items: center;
-  padding: 12px 16px;
+  padding: 14px 16px;
   cursor: pointer;
-  gap: 12px;
-  transition: background 0.2s;
+  gap: 14px;
+  transition: all 0.25s ease;
+  border-radius: 0 16px 16px 0;
+  margin-right: 8px;
 }
+
 .contact-item:hover {
-  background: #e8e8e8;
+  background: var(--bg-secondary);
+  transform: translateX(4px);
 }
+
 .contact-item.active {
-  background: #d9ecff;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.05));
+  border-left: 3px solid var(--primary-color);
 }
+
+.avatar-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.contact-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.status-badge {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-primary);
+  transition: all 0.3s ease;
+}
+
+.status-badge.online {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+}
+
+.status-badge.offline {
+  background: #94a3b8;
+}
+
 .contact-info {
   flex: 1;
   min-width: 0;
 }
+
 .contact-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  margin-bottom: 4px;
 }
+
 .contact-status {
-  font-size: 12px;
-  color: #999;
-  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
-.avatar-badge {
-  flex-shrink: 0;
+
+.group-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: white;
+  font-weight: 600;
 }
+
 .empty-hint {
   text-align: center;
-  color: #bbb;
-  padding: 40px 16px;
+  color: var(--text-muted);
+  padding: 60px 20px;
   font-size: 14px;
+}
+
+.empty-hint-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-hint-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.empty-hint-desc {
+  font-size: 13px;
+  color: var(--text-muted);
 }
 </style>
