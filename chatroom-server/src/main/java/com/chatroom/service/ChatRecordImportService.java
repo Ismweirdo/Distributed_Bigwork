@@ -1,6 +1,10 @@
 package com.chatroom.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.chatroom.common.Constants;
+import com.chatroom.mapper.FriendMapper;
 import com.chatroom.model.entity.BotSkill;
+import com.chatroom.model.entity.Friend;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +24,10 @@ import java.util.stream.Collectors;
 public class ChatRecordImportService {
 
     private final BotManager botManager;
+    private final FriendMapper friendMapper;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final int MIN_MESSAGES_PER_BOT = 10;
+    private static final int MAX_BOTS_PER_IMPORT = 20;
 
     // Emotion dictionary
     private static final Map<String, String> EMOTION_DICT = new LinkedHashMap<>() {{
@@ -52,7 +59,7 @@ public class ChatRecordImportService {
      * Import chat records and generate bots.
      * Supports: QQ Chat Exporter JSON, QQCE TXT, WeChat TXT, JSONL, generic JSON
      */
-    public List<Map<String, Object>> importAndGenerate(MultipartFile file) throws Exception {
+    public List<Map<String, Object>> importAndGenerate(MultipartFile file, Long currentUserId) throws Exception {
         String filename = file.getOriginalFilename();
         String content = new String(file.getBytes(), StandardCharsets.UTF_8);
 
@@ -73,7 +80,101 @@ public class ChatRecordImportService {
         }
 
         log.info("Parsed {} messages from {}", messages.size(), filename);
-        return generateBots(messages);
+        return generateBotsFromMessages(messages, currentUserId);
+    }
+
+    /**
+     * Generate bots directly from parsed sender/content messages.
+     * Used by both file import and QQ import flows.
+     */
+    public List<Map<String, Object>> generateBotsFromMessages(List<Map<String, String>> messages, Long currentUserId) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        return generateBots(messages, currentUserId);
+    }
+
+    /**
+     * QQ import diagnostics: generate bots and return per-sender eligibility/result details.
+     */
+    public Map<String, Object> generateBotsWithDiagnosticsFromMessages(List<Map<String, String>> messages, Long currentUserId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> generated = new ArrayList<>();
+        List<Map<String, Object>> senderDiagnostics = new ArrayList<>();
+        result.put("minRequired", MIN_MESSAGES_PER_BOT);
+
+        if (messages == null || messages.isEmpty()) {
+            result.put("generated", generated);
+            result.put("senderDiagnostics", senderDiagnostics);
+            return result;
+        }
+
+        Map<String, List<String>> bySender = messages.stream()
+                .collect(Collectors.groupingBy(
+                        m -> m.get("sender"),
+                        Collectors.mapping(m -> m.get("content"), Collectors.toList())));
+
+        int botIndex = 0;
+        for (Map.Entry<String, List<String>> entry : bySender.entrySet()) {
+            String senderName = entry.getKey();
+            List<String> senderMsgs = entry.getValue();
+            int messageCount = senderMsgs.size();
+            boolean eligible = messageCount >= MIN_MESSAGES_PER_BOT;
+
+            Map<String, Object> diag = new LinkedHashMap<>();
+            diag.put("sender", senderName);
+            diag.put("messageCount", messageCount);
+            diag.put("minRequired", MIN_MESSAGES_PER_BOT);
+            diag.put("eligible", eligible);
+
+            if (!eligible) {
+                diag.put("skippedReason", "消息数不足，当前" + messageCount + "条，需要" + MIN_MESSAGES_PER_BOT + "条");
+                senderDiagnostics.add(diag);
+                continue;
+            }
+            if (botIndex >= MAX_BOTS_PER_IMPORT) {
+                diag.put("eligible", false);
+                diag.put("skippedReason", "超出单次最多生成" + MAX_BOTS_PER_IMPORT + "个机器人的限制");
+                senderDiagnostics.add(diag);
+                continue;
+            }
+
+            Map<String, Double> emotions = extractEmotions(senderMsgs);
+            Map<String, Object> style = extractStyle(senderMsgs);
+            String systemPrompt = buildPrompt(senderName, emotions, style);
+            String emotionJson = toJson(emotions);
+            String styleJson = toJson(style);
+
+            try {
+                String username = "imp_" + sanitize(senderName) + "_" + (System.currentTimeMillis() % 10000);
+                BotSkill skill = botManager.registerBot(
+                        username, senderName, "导入_" + senderName,
+                        systemPrompt, "[]", emotionJson, styleJson,
+                        null, null, null);
+                ensureFriendRelation(currentUserId, skill.getBotUserId());
+
+                Map<String, Object> g = new LinkedHashMap<>();
+                g.put("botUserId", skill.getBotUserId());
+                g.put("nickname", senderName);
+                g.put("messageCount", messageCount);
+                g.put("dominantEmotion", emotions.entrySet().stream()
+                        .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("joy"));
+                g.put("systemPrompt", systemPrompt);
+                g.put("emotionProfile", emotions);
+                g.put("languageStyle", style);
+                generated.add(g);
+                botIndex++;
+                diag.put("skippedReason", "");
+            } catch (Exception e) {
+                diag.put("eligible", false);
+                diag.put("skippedReason", "Bot注册失败：" + e.getMessage());
+            }
+            senderDiagnostics.add(diag);
+        }
+
+        result.put("generated", generated);
+        result.put("senderDiagnostics", senderDiagnostics);
+        return result;
     }
 
     // ==================== JSON Parsing ====================
@@ -285,7 +386,7 @@ public class ChatRecordImportService {
 
     // ==================== Bot Generation ====================
 
-    private List<Map<String, Object>> generateBots(List<Map<String, String>> messages) {
+    private List<Map<String, Object>> generateBots(List<Map<String, String>> messages, Long currentUserId) {
         Map<String, List<String>> bySender = messages.stream()
                 .collect(Collectors.groupingBy(
                         m -> m.get("sender"),
@@ -300,11 +401,11 @@ public class ChatRecordImportService {
             String senderName = entry.getKey();
             List<String> senderMsgs = entry.getValue();
 
-            if (senderMsgs.size() < 10) {
-                log.info("Skipping {} ({} messages, need >= 10)", senderName, senderMsgs.size());
+            if (senderMsgs.size() < MIN_MESSAGES_PER_BOT) {
+                log.info("Skipping {} ({} messages, need >= {})", senderName, senderMsgs.size(), MIN_MESSAGES_PER_BOT);
                 continue;
             }
-            if (botIndex >= 20) break;
+            if (botIndex >= MAX_BOTS_PER_IMPORT) break;
 
             Map<String, Double> emotions = extractEmotions(senderMsgs);
             Map<String, Object> style = extractStyle(senderMsgs);
@@ -318,6 +419,7 @@ public class ChatRecordImportService {
                         username, senderName, "导入_" + senderName,
                         systemPrompt, "[]", emotionJson, styleJson,
                         null, null, null);
+                ensureFriendRelation(currentUserId, skill.getBotUserId());
 
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("botUserId", skill.getBotUserId());
@@ -337,6 +439,28 @@ public class ChatRecordImportService {
 
         log.info("Generated {} bots from imported records", results.size());
         return results;
+    }
+
+    private void ensureFriendRelation(Long currentUserId, Long botUserId) {
+        if (currentUserId == null || botUserId == null) return;
+
+        LambdaQueryWrapper<Friend> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Friend::getUserId, currentUserId)
+                .eq(Friend::getFriendId, botUserId);
+        Friend existing = friendMapper.selectOne(wrapper);
+        if (existing != null) {
+            if (existing.getStatus() != Constants.FRIEND_STATUS_ACCEPTED) {
+                existing.setStatus(Constants.FRIEND_STATUS_ACCEPTED);
+                friendMapper.updateById(existing);
+            }
+            return;
+        }
+
+        Friend relation = new Friend();
+        relation.setUserId(currentUserId);
+        relation.setFriendId(botUserId);
+        relation.setStatus(Constants.FRIEND_STATUS_ACCEPTED);
+        friendMapper.insert(relation);
     }
 
     // ==================== Feature Extraction ====================
@@ -397,6 +521,8 @@ public class ChatRecordImportService {
     }
 
     private String sanitize(String s) {
-        return s.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5]", "").substring(0, Math.min(s.length(), 10));
+        String cleaned = s == null ? "" : s.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5]", "");
+        if (cleaned.isEmpty()) return "user";
+        return cleaned.substring(0, Math.min(cleaned.length(), 10));
     }
 }

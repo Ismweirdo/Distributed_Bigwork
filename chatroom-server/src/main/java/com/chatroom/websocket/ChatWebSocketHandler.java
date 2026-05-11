@@ -186,7 +186,7 @@ public class ChatWebSocketHandler {
         botDto.setMessageType(messageType);
         botDto.setTargetId(targetId);
         botDto.setContentType(Constants.CONTENT_TYPE_TEXT);
-        botDto.setClientMessageId("BOT_" + UUID.randomUUID().toString());
+        botDto.setClientMessageId(UUID.randomUUID().toString());
 
         MessageVO botMsg = messageService.sendAndSaveMessage(botUserId, botDto);
         Map<String, Object> botPayload = buildWsPayload(botMsg);
