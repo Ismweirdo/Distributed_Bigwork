@@ -20,10 +20,23 @@ public class QQChatExporterClient {
     @Value("${bot.qqce-url:http://localhost:40653}")
     private String qqceBaseUrl;
 
+    private HttpHeaders buildHeaders(String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (token != null && !token.isEmpty()) {
+            headers.set("Authorization", "Bearer " + token);
+            log.debug("QQCE request with Authorization header (token len={})", token.length());
+        } else {
+            log.debug("QQCE request WITHOUT Authorization header (token is null or empty)");
+        }
+        return headers;
+    }
+
     /** Check if QQCE is running and accessible */
-    public Map<String, Object> healthCheck() {
+    public Map<String, Object> healthCheck(String token) {
         try {
-            ResponseEntity<Map> resp = restTemplate.getForEntity(qqceBaseUrl + "/health", Map.class);
+            HttpEntity<Void> request = new HttpEntity<>(buildHeaders(token));
+            ResponseEntity<Map> resp = restTemplate.exchange(qqceBaseUrl + "/health", HttpMethod.GET, request, Map.class);
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("connected", resp.getStatusCode().is2xxSuccessful());
             result.put("url", qqceBaseUrl);
@@ -38,9 +51,10 @@ public class QQChatExporterClient {
     }
 
     /** Get friend list from QQ */
-    public List<Map<String, Object>> getFriends() {
+    public List<Map<String, Object>> getFriends(String token) {
         try {
-            ResponseEntity<Map> resp = restTemplate.getForEntity(qqceBaseUrl + "/api/friends", Map.class);
+            HttpEntity<Void> request = new HttpEntity<>(buildHeaders(token));
+            ResponseEntity<Map> resp = restTemplate.exchange(qqceBaseUrl + "/api/friends", HttpMethod.GET, request, Map.class);
             Map<String, Object> data = (Map<String, Object>) resp.getBody().get("data");
             if (data == null) data = resp.getBody();
             List<Map<String, Object>> friends = (List<Map<String, Object>>) data.get("friends");
@@ -53,9 +67,10 @@ public class QQChatExporterClient {
     }
 
     /** Get group list from QQ */
-    public List<Map<String, Object>> getGroups() {
+    public List<Map<String, Object>> getGroups(String token) {
         try {
-            ResponseEntity<Map> resp = restTemplate.getForEntity(qqceBaseUrl + "/api/groups", Map.class);
+            HttpEntity<Void> request = new HttpEntity<>(buildHeaders(token));
+            ResponseEntity<Map> resp = restTemplate.exchange(qqceBaseUrl + "/api/groups", HttpMethod.GET, request, Map.class);
             Map<String, Object> data = (Map<String, Object>) resp.getBody().get("data");
             if (data == null) data = resp.getBody();
             List<Map<String, Object>> groups = (List<Map<String, Object>>) data.get("groups");
@@ -68,7 +83,7 @@ public class QQChatExporterClient {
     }
 
     /** Fetch messages for a specific chat (friend or group) */
-    public List<Map<String, Object>> fetchMessages(String chatType, String peerUid, int count) {
+    public List<Map<String, Object>> fetchMessages(String chatType, String peerUid, int count, String token) {
         try {
             Map<String, Object> body = Map.of(
                 "peer", Map.of("chatType", chatType.equals("group") ? 2 : 1, "peerUid", peerUid),
@@ -77,20 +92,28 @@ public class QQChatExporterClient {
                 "limit", Math.min(count, 5000)
             );
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, buildHeaders(token));
 
             ResponseEntity<Map> resp = restTemplate.postForEntity(
                     qqceBaseUrl + "/api/messages/fetch", request, Map.class);
 
+            log.debug("QQCE fetchMessages response status: {}", resp.getStatusCode());
+            log.debug("QQCE fetchMessages response body keys: {}", resp.getBody() != null ? resp.getBody().keySet() : "null");
+            log.debug("QQCE fetchMessages full response: {}", resp.getBody());
+
             Map<String, Object> data = (Map<String, Object>) resp.getBody().get("data");
             if (data == null) data = resp.getBody();
 
+            log.debug("QQCE data keys: {}", data != null ? data.keySet() : "null");
+
             Object messagesObj = data.get("messages");
             if (messagesObj instanceof List) {
+                log.info("QQCE fetched {} messages for {}", ((List) messagesObj).size(), peerUid);
                 return (List<Map<String, Object>>) messagesObj;
             }
+            log.warn("QQCE response has no 'messages' list. messagesObj type: {}, value: {}",
+                    messagesObj != null ? messagesObj.getClass().getName() : "null",
+                    messagesObj);
             return List.of();
         } catch (Exception e) {
             log.error("Failed to fetch messages for {}: {}", peerUid, e.getMessage());

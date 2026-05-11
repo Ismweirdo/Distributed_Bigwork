@@ -20,6 +20,10 @@ export function registerBot(data) {
   return request.post('/bots/register', data)
 }
 
+export function deleteBot(userId) {
+  return request.delete(`/bots/${userId}`)
+}
+
 export function deactivateBot(userId) {
   return request.delete(`/bots/${userId}`)
 }
@@ -31,24 +35,26 @@ export function distillSkills() {
 export function importChatRecords(file) {
   const formData = new FormData()
   formData.append('file', file)
-  return request.post('/bots/import', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
-  })
+  return request.post('/bots/import', formData)
 }
 
 // QQ Chat Exporter integration
-export function checkQQCEHealth() {
-  return request.get('/bots/qq/health')
+function qqceHeaders(token) {
+  return token ? { 'X-QQCE-Token': token } : {}
 }
 
-export function getQQFriends() {
-  return request.get('/bots/qq/friends')
+export function checkQQCEHealth(token) {
+  return request.get('/bots/qq/health', { headers: qqceHeaders(token) })
 }
 
-export function getQQGroups() {
-  return request.get('/bots/qq/groups')
+export function getQQFriends(token) {
+  return request.get('/bots/qq/friends', { headers: qqceHeaders(token) })
 }
 
-export function qqImportBots(data) {
-  return request.post('/bots/qq/import', data)
+export function getQQGroups(token) {
+  return request.get('/bots/qq/groups', { headers: qqceHeaders(token) })
+}
+
+export function qqImportBots(data, token) {
+  return request.post('/bots/qq/import', data, { headers: qqceHeaders(token) })
 }

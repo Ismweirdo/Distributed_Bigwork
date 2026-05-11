@@ -9,12 +9,14 @@ import com.chatroom.model.entity.User;
 import com.chatroom.model.vo.FriendVO;
 import com.chatroom.service.FriendService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class FriendServiceImpl implements FriendService {
@@ -103,10 +105,13 @@ public class FriendServiceImpl implements FriendService {
                 vo.setAvatar(user.getAvatar());
                 vo.setStatus(user.getStatus());
                 vo.setFriendStatus(f.getStatus());
+                vo.setIsBot(user.getIsBot());
                 vo.setCreatedAt(f.getCreatedAt());
                 result.add(vo);
             }
         }
+        log.info("getFriendList for user {}: found {} friends ({} Friend records, {} with valid User)",
+                userId, result.size(), friends.size(), result.size());
         return result;
     }
 
@@ -128,6 +133,7 @@ public class FriendServiceImpl implements FriendService {
                 vo.setAvatar(user.getAvatar());
                 vo.setStatus(user.getStatus());
                 vo.setFriendStatus(f.getStatus());
+                vo.setIsBot(user.getIsBot());
                 vo.setCreatedAt(f.getCreatedAt());
                 result.add(vo);
             }

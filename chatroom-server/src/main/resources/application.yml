@@ -28,6 +28,11 @@ spring:
       mode: always
       schema-locations: classpath:sql/schema.sql
 
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
@@ -56,6 +61,6 @@ logging:
 # Set API key via environment variable: export BOT_API_KEY=sk-your-key
 # Or paste directly below (not recommended for production)
 bot:
-  default-api-key: ${BOT_API_KEY:sk-d2919df6a5c24206a6fb77ad084d0a29}
+  default-api-key: ${BOT_API_KEY:}
   default-api-endpoint: ${BOT_API_ENDPOINT:https://api.deepseek.com/v1/chat/completions}
   default-model: ${BOT_API_MODEL:deepseek-chat}

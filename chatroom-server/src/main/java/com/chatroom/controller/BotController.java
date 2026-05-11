@@ -2,10 +2,13 @@ package com.chatroom.controller;
 
 import com.chatroom.common.Result;
 import com.chatroom.model.entity.BotSkill;
+import com.chatroom.security.SecurityUtil;
 import com.chatroom.service.BotManager;
 import com.chatroom.service.ChatRecordImportService;
 import com.chatroom.service.QQChatExporterClient;
 import com.chatroom.service.SkillDistillerService;
+import com.chatroom.service.SkillDocImportService;
+import lombok.extern.slf4j.Slf4j;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
@@ -15,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/bots")
 @RequiredArgsConstructor
@@ -24,6 +28,7 @@ public class BotController {
     private final SkillDistillerService skillDistillerService;
     private final ChatRecordImportService chatRecordImportService;
     private final QQChatExporterClient qqChatExporterClient;
+    private final SkillDocImportService skillDocImportService;
 
     @Value("${bot.default-api-endpoint:}")
     private String defaultApiEndpoint;
@@ -65,9 +70,9 @@ public class BotController {
     }
 
     @DeleteMapping("/{userId}")
-    public Result<String> deactivate(@PathVariable Long userId) {
-        botManager.deactivateBot(userId);
-        return Result.ok("Bot deactivated");
+    public Result<String> deleteBot(@PathVariable Long userId) {
+        botManager.permanentDelete(userId);
+        return Result.ok("Bot deleted");
     }
 
     @GetMapping("/")
@@ -93,8 +98,23 @@ public class BotController {
     @PostMapping("/import")
     public Result<List<Map<String, Object>>> importRecords(@RequestParam("file") MultipartFile file) {
         try {
-            List<Map<String, Object>> results = chatRecordImportService.importAndGenerate(file);
+            Long userId = SecurityUtil.getCurrentUserId();
+            List<Map<String, Object>> results = chatRecordImportService.importAndGenerate(file, userId);
             return Result.ok(results);
+        } catch (Exception e) {
+            return Result.error(500, "导入失败: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/skills/import")
+    public Result<Map<String, Object>> importSkillDoc(@RequestParam("file") MultipartFile file) {
+        try {
+            BotSkill skill = skillDocImportService.importSkillDoc(file);
+            return Result.ok(Map.of(
+                    "skillId", skill.getId(),
+                    "botUserId", skill.getBotUserId(),
+                    "skillName", skill.getSkillName()
+            ));
         } catch (Exception e) {
             return Result.error(500, "导入失败: " + e.getMessage());
         }
@@ -103,22 +123,26 @@ public class BotController {
     // ==================== QQ Chat Exporter Integration ====================
 
     @GetMapping("/qq/health")
-    public Result<Map<String, Object>> qqHealth() {
-        return Result.ok(qqChatExporterClient.healthCheck());
+    public Result<Map<String, Object>> qqHealth(@RequestHeader(value = "X-QQCE-Token", required = false) String qqceToken) {
+        log.debug("QQ health check - token received: {}", qqceToken != null ? "yes (len=" + qqceToken.length() + ")" : "no");
+        return Result.ok(qqChatExporterClient.healthCheck(qqceToken));
     }
 
     @GetMapping("/qq/friends")
-    public Result<List<Map<String, Object>>> qqFriends() {
-        return Result.ok(qqChatExporterClient.getFriends());
+    public Result<List<Map<String, Object>>> qqFriends(@RequestHeader(value = "X-QQCE-Token", required = false) String qqceToken) {
+        log.debug("QQ friends request - token received: {}", qqceToken != null ? "yes (len=" + qqceToken.length() + ")" : "no");
+        return Result.ok(qqChatExporterClient.getFriends(qqceToken));
     }
 
     @GetMapping("/qq/groups")
-    public Result<List<Map<String, Object>>> qqGroups() {
-        return Result.ok(qqChatExporterClient.getGroups());
+    public Result<List<Map<String, Object>>> qqGroups(@RequestHeader(value = "X-QQCE-Token", required = false) String qqceToken) {
+        return Result.ok(qqChatExporterClient.getGroups(qqceToken));
     }
 
     @PostMapping("/qq/import")
-    public Result<List<Map<String, Object>>> qqImport(@RequestBody Map<String, Object> body) {
+    public Result<List<Map<String, Object>>> qqImport(@RequestBody Map<String, Object> body,
+                                                       @RequestHeader(value = "X-QQCE-Token", required = false) String qqceToken) {
+        Long userId = SecurityUtil.getCurrentUserId();
         List<Map<String, Object>> results = new ArrayList<>();
         List<Map<String, Object>> selections = (List<Map<String, Object>>) body.get("selections");
         int msgCount = (int) body.getOrDefault("messageCount", 500);
@@ -133,23 +157,45 @@ public class BotController {
             String name = (String) sel.get("name");
 
             try {
-                List<Map<String, Object>> messages = qqChatExporterClient.fetchMessages(chatType, peerUid, msgCount);
+                List<Map<String, Object>> messages = qqChatExporterClient.fetchMessages(chatType, peerUid, msgCount, qqceToken);
+                log.info("QQCE raw message count: {}", messages.size());
                 // Convert to simple format
                 List<Map<String, String>> simple = new ArrayList<>();
-                for (Map<String, Object> msg : messages) {
+                int emptyCount = 0, filteredCount = 0;
+                boolean isFriendChat = "friend".equals(chatType);
+                if (isFriendChat) log.info("QQCE friend chat filter: peerUid={}", peerUid);
+                for (int i = 0; i < messages.size(); i++) {
+                    Map<String, Object> msg = messages.get(i);
                     String sender = extractSenderName(msg);
                     String text = extractMessageText(msg);
+                    // For 1-on-1 friend chats, only keep messages from the selected friend
+                    if (isFriendChat && peerUid != null) {
+                        String senderUid = (String) msg.get("senderUid");
+                        if (i < 2) log.info("QQCE msg[{}]: senderUid={}, peerUid={}", i, senderUid, peerUid);
+                        if (senderUid == null || !senderUid.equals(peerUid)) {
+                            filteredCount++;
+                            continue;
+                        }
+                    }
+                    if (i < 3) {
+                        log.info("QQCE msg[{}]: sender=[{}], text=[{}]", i, sender, text);
+                    }
                     if (!text.isEmpty()) {
                         simple.add(Map.of("sender", sender, "content", text));
+                    } else {
+                        emptyCount++;
                     }
                 }
-                // Use import service to generate bot from messages
-                // We call the internal logic directly
+                log.info("QQCE conversion: {} total, {} converted, {} empty, {} filtered (not selected friend)", messages.size(), simple.size(), emptyCount, filteredCount);
+                // Generate bots from messages
+                List<Map<String, Object>> botResults = chatRecordImportService.generateBotsFromMessages(simple, userId);
                 results.add(Map.of(
                     "name", name,
                     "chatType", chatType,
                     "messageCount", simple.size(),
-                    "status", "fetched"
+                    "botsGenerated", botResults.size(),
+                    "bots", botResults,
+                    "status", "imported"
                 ));
             } catch (Exception e) {
                 results.add(Map.of(
@@ -165,19 +211,51 @@ public class BotController {
     }
 
     private String extractSenderName(Map<String, Object> msg) {
+        // QQCE v5+ format: sendNickName, sendRemarkName, sendMemberName
+        String name = (String) msg.get("sendNickName");
+        if (name != null && !name.isEmpty()) return name;
+        name = (String) msg.get("sendRemarkName");
+        if (name != null && !name.isEmpty()) return name;
+        name = (String) msg.get("sendMemberName");
+        if (name != null && !name.isEmpty()) return name;
+        // Old QQCE format: sender { name, uid, uin }
         Object senderObj = msg.get("sender");
         if (senderObj instanceof Map) {
             Map<String, Object> s = (Map<String, Object>) senderObj;
             return String.valueOf(s.getOrDefault("name",
                     s.getOrDefault("uid", s.getOrDefault("uin", "unknown"))));
         }
-        return String.valueOf(msg.getOrDefault("senderName", msg.getOrDefault("sender", "unknown")));
+        return String.valueOf(msg.getOrDefault("senderName",
+                msg.getOrDefault("sender", msg.getOrDefault("senderUid", "unknown"))));
     }
 
     private String extractMessageText(Map<String, Object> msg) {
+        // QQCE v5+ format: elements[{textElement: {content: "..."}}]
+        Object elementsObj = msg.get("elements");
+        if (elementsObj instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> elements = (List<Map<String, Object>>) elementsObj;
+            StringBuilder sb = new StringBuilder();
+            for (Map<String, Object> elem : elements) {
+                Object te = elem.get("textElement");
+                if (te instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> textElem = (Map<String, Object>) te;
+                    Object c = textElem.get("content");
+                    if (c instanceof String && !((String) c).isEmpty()) {
+                        if (sb.length() > 0) sb.append(" ");
+                        sb.append((String) c);
+                    }
+                }
+            }
+            if (sb.length() > 0) return sb.toString();
+        }
+        // Old QQCE format: content { text: "..." } or content: "..."
         Object contentObj = msg.get("content");
         if (contentObj instanceof Map) {
-            return String.valueOf(((Map) contentObj).getOrDefault("text", ""));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cm = (Map<String, Object>) contentObj;
+            return String.valueOf(cm.getOrDefault("text", ""));
         }
         if (contentObj instanceof String) return (String) contentObj;
         return String.valueOf(msg.getOrDefault("text", msg.getOrDefault("content", "")));

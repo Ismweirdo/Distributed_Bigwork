@@ -10,7 +10,12 @@
         <p><b>1.</b> 下载 QQ Chat Exporter: <a href="https://github.com/shuakami/qq-chat-exporter/releases" target="_blank">Releases</a></p>
         <p><b>2.</b> 解压并运行 <code>launcher-user.bat</code> (Windows)</p>
         <p><b>3.</b> 用 QQ 扫码登录</p>
-        <p><b>4.</b> 确保 <code>http://localhost:40653</code> 可访问</p>
+        <p><b>4.</b> 复制 QQ Chat Exporter 界面中显示的 <b>访问令牌 (Access Token)</b></p>
+      </div>
+      <div style="margin-top:12px;">
+        <el-input v-model="qqceToken" placeholder="粘贴 QQ Chat Exporter 访问令牌" clearable show-password>
+          <template #prepend>访问令牌</template>
+        </el-input>
       </div>
       <div style="text-align:center;margin-top:16px;">
         <el-button type="primary" @click="checkQQCE" :loading="checking">重新检测连接</el-button>
@@ -22,6 +27,9 @@
       <el-alert type="success" :closable="false" style="margin-bottom:12px">
         已连接 QQ Chat Exporter，共 {{ friends.length }} 个好友，{{ groups.length }} 个群
       </el-alert>
+      <el-input v-if="!qqceToken" v-model="qqceToken" placeholder="如需重新获取列表，请粘贴访问令牌" clearable show-password size="small" style="margin-bottom:12px">
+        <template #prepend>访问令牌</template>
+      </el-input>
 
       <el-tabs v-model="qqTab">
         <el-tab-pane :label="`好友 (${friends.length})`" name="friends">
@@ -91,6 +99,7 @@ const visible = computed({
 
 const checking = ref(false)
 const qqConnected = ref(false)
+const qqceToken = ref('')
 const friends = ref([])
 const groups = ref([])
 const selections = ref([])
@@ -120,6 +129,7 @@ const filteredGroups = computed(() => {
 async function onOpen() {
   checking.value = true
   qqConnected.value = false
+  qqceToken.value = ''
   friends.value = []
   groups.value = []
   selections.value = []
@@ -133,11 +143,12 @@ async function onOpen() {
 async function checkQQCE() {
   checking.value = true
   try {
-    const data = await checkQQCEHealth()
+    const token = qqceToken.value || undefined
+    const data = await checkQQCEHealth(token)
     if (data.connected) {
       qqConnected.value = true
       // Load friends and groups
-      const [f, g] = await Promise.all([getQQFriends(), getQQGroups()])
+      const [f, g] = await Promise.all([getQQFriends(token), getQQGroups(token)])
       friends.value = f || []
       groups.value = g || []
       ElMessage.success(`已连接，找到 ${friends.value.length} 个好友，${groups.value.length} 个群`)
@@ -146,6 +157,7 @@ async function checkQQCE() {
     }
   } catch (e) {
     qqConnected.value = false
+    ElMessage.error('连接失败: ' + (e.message || '请确认访问令牌是否正确'))
   } finally {
     checking.value = false
   }
@@ -171,7 +183,7 @@ async function doQQImport() {
     await qqImportBots({
       selections: selections.value,
       messageCount: msgCount.value
-    })
+    }, qqceToken.value || undefined)
     ElMessage.success('QQ聊天记录已导入，机器人已生成')
     visible.value = false
     emit('done')

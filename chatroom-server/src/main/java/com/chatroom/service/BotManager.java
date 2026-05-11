@@ -3,9 +3,11 @@ package com.chatroom.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.chatroom.common.Constants;
 import com.chatroom.mapper.BotSkillMapper;
+import com.chatroom.mapper.FriendMapper;
 import com.chatroom.mapper.MessageMapper;
 import com.chatroom.mapper.UserMapper;
 import com.chatroom.model.entity.BotSkill;
+import com.chatroom.model.entity.Friend;
 import com.chatroom.model.entity.Message;
 import com.chatroom.model.entity.User;
 import lombok.RequiredArgsConstructor;
@@ -26,7 +28,9 @@ public class BotManager {
     private final BotSkillMapper botSkillMapper;
     private final UserMapper userMapper;
     private final MessageMapper messageMapper;
+    private final FriendMapper friendMapper;
     private final LLMApiClient llmApiClient;
+    private final BotSkillDocService botSkillDocService;
 
     // Per-bot semaphore for concurrency control
     private final ConcurrentHashMap<Long, Semaphore> botSemaphores = new ConcurrentHashMap<>();
@@ -79,6 +83,8 @@ public class BotManager {
         skill.setLastActiveAt(LocalDateTime.now());
         botSkillMapper.insert(skill);
 
+        botSkillDocService.exportSkillDoc(skill);
+
         botSemaphores.put(bot.getId(), new Semaphore(Constants.BOT_MAX_CONCURRENCY));
         botQueues.put(bot.getId(), new LinkedList<>());
         circuitBreakers.put(bot.getId(), false);
@@ -95,6 +101,11 @@ public class BotManager {
         BotSkill skill = getBotSkill(botUserId);
         if (skill == null) return null;
 
+        // Lazy-init in-memory structures (survives server restart)
+        botSemaphores.computeIfAbsent(botUserId, k -> new Semaphore(Constants.BOT_MAX_CONCURRENCY));
+        botQueues.computeIfAbsent(botUserId, k -> new LinkedList<>());
+        circuitBreakers.computeIfAbsent(botUserId, k -> false);
+
         // Circuit breaker check
         if (Boolean.TRUE.equals(circuitBreakers.get(botUserId))) {
             long openTime = circuitOpenTime.getOrDefault(botUserId, 0L);
@@ -107,7 +118,7 @@ public class BotManager {
         }
 
         Semaphore sem = botSemaphores.get(botUserId);
-        if (sem == null || !sem.tryAcquire()) {
+        if (!sem.tryAcquire()) {
             // Busy, queue or drop
             enqueueMessage(botUserId, senderId, senderName, content);
             return null;
@@ -185,6 +196,35 @@ public class BotManager {
         botQueues.remove(botUserId);
         circuitBreakers.remove(botUserId);
         log.info("Bot {} deactivated", botUserId);
+    }
+
+    /** Permanently delete bot: remove user, skills, and all friend relationships */
+    @org.springframework.transaction.annotation.Transactional
+    public void permanentDelete(Long botUserId) {
+        // Delete all friend relationships involving this bot
+        friendMapper.delete(new LambdaQueryWrapper<Friend>()
+                .eq(Friend::getUserId, botUserId)
+                .or().eq(Friend::getFriendId, botUserId));
+
+        // Delete bot skills
+        List<BotSkill> skills = botSkillMapper.selectList(new LambdaQueryWrapper<BotSkill>()
+                .eq(BotSkill::getBotUserId, botUserId));
+        for (BotSkill skill : skills) {
+            botSkillDocService.deleteSkillDoc(skill);
+        }
+        botSkillMapper.delete(new LambdaQueryWrapper<BotSkill>()
+                .eq(BotSkill::getBotUserId, botUserId));
+
+        // Delete the user record
+        userMapper.deleteById(botUserId);
+
+        // Clean up in-memory state
+        botSemaphores.remove(botUserId);
+        botQueues.remove(botUserId);
+        circuitBreakers.remove(botUserId);
+        circuitOpenTime.remove(botUserId);
+
+        log.info("Bot {} permanently deleted", botUserId);
     }
 
     public List<BotSkill> getActiveBots() {

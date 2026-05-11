@@ -43,7 +43,7 @@
           </button>
         </div>
       </div>
-      <ContactList @select="onSelectContact" @group-info="onGroupInfo" />
+      <ContactList @select="onSelectContact" @group-info="onGroupInfo" @refresh="refreshContacts" />
     </div>
 
     <!-- Right Chat Area -->

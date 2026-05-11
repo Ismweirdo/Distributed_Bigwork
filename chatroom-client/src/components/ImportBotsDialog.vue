@@ -84,31 +84,34 @@ const fileReady = ref(false)
 const importing = ref(false)
 const results = ref([])
 const uploadRef = ref(null)
+const selectedFile = ref(null)
 
 function onOpen() {
   step.value = 1
   fileReady.value = false
   importing.value = false
   results.value = []
+  selectedFile.value = null
 }
 
 function onFileChange(file) {
-  fileReady.value = true
+  selectedFile.value = file?.raw || null
+  fileReady.value = !!selectedFile.value
 }
 
 function onFileRemove() {
+  selectedFile.value = null
   fileReady.value = false
 }
 
 async function doImport() {
-  if (!uploadRef.value?.uploadFiles?.[0]?.raw) {
+  if (!selectedFile.value) {
     ElMessage.warning('请先选择文件')
     return
   }
   importing.value = true
   try {
-    const file = uploadRef.value.uploadFiles[0].raw
-    results.value = await importChatRecords(file)
+    results.value = await importChatRecords(selectedFile.value)
     step.value = 2
     if (results.value.length > 0) {
       ElMessage.success(`成功生成 ${results.value.length} 个机器人`)
@@ -125,6 +128,7 @@ function reset() {
   step.value = 1
   fileReady.value = false
   results.value = []
+  selectedFile.value = null
   if (uploadRef.value) uploadRef.value.clearFiles()
 }
 
