@@ -78,6 +78,17 @@ public class ChatRecordImportService {
         }
 
         log.info("Parsed {} messages from {}", messages.size(), filename);
+        return generateBotsFromMessages(messages, currentUserId);
+    }
+
+    /**
+     * Generate bots directly from parsed sender/content messages.
+     * Used by both file import and QQ import flows.
+     */
+    public List<Map<String, Object>> generateBotsFromMessages(List<Map<String, String>> messages, Long currentUserId) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
         return generateBots(messages, currentUserId);
     }
 

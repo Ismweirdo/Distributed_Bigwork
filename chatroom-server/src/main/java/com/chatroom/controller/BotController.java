@@ -124,6 +124,7 @@ public class BotController {
         List<Map<String, Object>> results = new ArrayList<>();
         List<Map<String, Object>> selections = (List<Map<String, Object>>) body.get("selections");
         int msgCount = (int) body.getOrDefault("messageCount", 500);
+        Long currentUserId = SecurityUtil.getCurrentUserId();
 
         if (selections == null || selections.isEmpty()) {
             return Result.error(400, "请选择要导入的好友或群");
@@ -145,14 +146,25 @@ public class BotController {
                         simple.add(Map.of("sender", sender, "content", text));
                     }
                 }
-                // Use import service to generate bot from messages
-                // We call the internal logic directly
-                results.add(Map.of(
-                    "name", name,
-                    "chatType", chatType,
-                    "messageCount", simple.size(),
-                    "status", "fetched"
-                ));
+                List<Map<String, Object>> generated = chatRecordImportService.generateBotsFromMessages(simple, currentUserId);
+                if (generated.isEmpty()) {
+                    results.add(Map.of(
+                            "name", name,
+                            "chatType", chatType,
+                            "messageCount", simple.size(),
+                            "generatedCount", 0,
+                            "status", "no_bots_generated"
+                    ));
+                } else {
+                    results.add(Map.of(
+                            "name", name,
+                            "chatType", chatType,
+                            "messageCount", simple.size(),
+                            "generatedCount", generated.size(),
+                            "status", "generated",
+                            "bots", generated
+                    ));
+                }
             } catch (Exception e) {
                 results.add(Map.of(
                     "name", name,
