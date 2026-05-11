@@ -10,6 +10,8 @@
 - 私聊：实时消息、引用回复、撤回、已读状态、历史记录
 - 群聊：创建/邀请/移除成员、退出群组、群内广播
 - 消息可靠性与 30 天保留策略
+- **机器人系统**：20+ Bot同时在线、Skill驱动的不同语言风格与情绪模式
+- **聊天记录蒸馏**：从QQ/微信/本系统聊天记录生成Skill与机器人
 
 ## 技术栈
 
@@ -23,6 +25,7 @@
 
 - 浏览器通过 REST API 与 WebSocket 与后端交互
 - 后端支持无状态部署，生产环境可通过 Redis/RabbitMQ 扩展
+- Bot Manager 统一管理多机器人、技能与API接入
 
 ## 目录结构
 
@@ -73,6 +76,35 @@
 - H2 控制台：`http://localhost:8080/h2-console`
 - API 文档（Knife4j）：`http://localhost:8080/doc.html`
 - 切换 MySQL：修改 `chatroom-server/src/main/resources/application.yml` 中的 datasource 配置
+
+## 机器人与Skill（重点）
+
+### Skill 如何设计
+- Skill = System Prompt + Few-shot 示例 + 语言风格/情绪配置
+- 生成来源：手动创建 / 导入聊天记录 / 数据库蒸馏
+- 入口形式：UI创建与API创建同时支持
+- 每个Bot绑定一个Skill，可随时切换或版本回滚
+
+### 如何导入AI
+- 每个Bot独立配置 `api_endpoint` / `api_key` / `model`
+- 支持同厂商多Key、多模型混用，便于20+ Bot并行在线
+
+### 如何蒸馏聊天记录
+- 支持从数据库定时蒸馏（默认30天）
+- 支持导入文件直接生成Skill与Bot
+- 结果包含可上线Skill配置与人设摘要
+
+### 导入QQ/微信聊天记录
+- 优先支持 JSON / TXT 导出文件
+- 导入后可映射发送者并生成Skill与Bot
+- 示例数据：`test/sample-qqce-export.json`、`test/sample-qqce-export.txt`
+
+## 测试与验证
+
+- 并发测试：作为重点，验证20+ Bot同时在线与响应延迟
+- 导入测试：QQ/微信记录 → Skill生成 → Bot注册
+- 回归测试：Skill版本回滚、Bot切换Skill、API Key失效
+- 参考脚本：`test/test-bots-ws.py`、`test/test-bots.sh`、`test/test-bots.bat`
 
 ## 相关文档
 

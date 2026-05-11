@@ -143,10 +143,32 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 - **数据库蒸馏**: 定时任务分析30天聊天记录
 - **文件导入**: 用户上传聊天记录文件，即时生成机器人
 
-### 8.2 导入聊天记录格式
-支持三种格式：JSONL（每行一个JSON对象）、JSON数组、TXT（微信/QQ导出格式 `昵称: 消息`）。每条记录需包含 `sender`（发送者）和 `content`（消息内容）。
+### 8.2 Skill生命周期与生成
+- 创建方式: 手动编辑 / 文件导入 / 数据库蒸馏
+- 入口形式: UI创建与API创建同时支持
+- 预览校验: 生成“人设摘要”和示例对话用于确认
+- 版本管理: Skill配置按版本存档，可回滚
+- 绑定关系: 1个Bot绑定1个Skill，支持一键切换Skill
 
-### 8.3 蒸馏流水线
+### 8.3 导入聊天记录格式
+优先支持JSONL（每行一个JSON对象）与JSON数组、TXT（微信/QQ导出格式 `昵称: 消息`）。每条记录需包含 `sender`（发送者）和 `content`（消息内容）。
+
+**QQ/微信解析适配**:
+- 优先支持JSON/TXT导出文件，HTML作为可选扩展
+- 提供字段映射（昵称、群名、时间戳、消息类型）
+- 统一转换为内部 `ChatLogEntry` 结构
+
+```json
+{
+  "sender": "Alice",
+  "content": "今天好累",
+  "timestamp": "2026-05-01T10:00:00",
+  "channel": "group",
+  "source": "wechat"
+}
+```
+
+### 8.4 蒸馏流水线
 
 ```
 ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -162,7 +184,7 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
                                                └──────────┘
 ```
 
-### 8.3 特征提取 (纯数据分析，不训练)
+### 8.5 特征提取 (纯数据分析，不训练)
 
 **情绪分布提取**:
 - 扫描用户所有消息，基于情绪词典统计 喜/怒/哀/惊/恐/厌 六维分布
@@ -182,7 +204,7 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 - 平均回复字数、回复延迟分布
 - 是否倾向承接上文 vs 开启新话题
 
-### 8.4 Skill配置
+### 8.6 Skill配置
 ```json
 {
   "skill_id": "skill_001",
@@ -207,7 +229,12 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 }
 ```
 
-### 8.5 多机器人并发管理
+### 8.7 AI导入与多厂商接入
+- Bot配置包含 `api_endpoint`、`api_key`、`model` 与 `skill_id`
+- 每个Bot独立Key，隔离调用失败
+- 支持同厂商多Key与多模型混合部署
+
+### 8.8 多机器人并发管理
 
 ```
                      ┌─────────────────┐
@@ -240,7 +267,7 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 熔断器: 连续3次失败 → 静默30s → 半开探测 → 恢复或继续熔断
 ```
 
-### 8.6 错误隔离与容错
+### 8.9 错误隔离与容错
 
 | 故障场景 | 处理方式 | 影响范围 |
 |---------|---------|---------|
@@ -255,7 +282,7 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 - 20个Bot分散到至少3个不同API厂商
 - Bot错误率 < 0.1%: 即每1000条消息中 < 1次API错误
 
-### 8.7 监控指标
+### 8.10 监控指标
 | 指标 | 采集 | 告警阈值 |
 |------|------|---------|
 | Bot回复延迟 | Bot Manager | > 3s (P95) |
@@ -263,32 +290,55 @@ Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径:
 | Bot在线数 | 心跳检测 | < 20 |
 | API调用频率 | 各API厂商 | 接近限频上限 |
 
-## 9. 水平扩展
+### 8.11 测试设计（重点覆盖机器人）
+- **并发测试**: 作为重点，20+ Bot同时在线，验证延迟/错误率/熔断
+- **单元测试**: Skill特征提取、导入解析、字段映射、配置生成
+- **集成测试**: 导入文件 → 生成Skill → 注册Bot → WS在线
+- **回归测试**: 技能版本回滚、Bot切换Skill、API Key失效
 
-### 扩容阶段
-| 阶段 | 用户量 | 节点 | Redis | MySQL |
-|------|--------|------|-------|-------|
-| V1 Demo | < 100 | 1 (H2) | 无 | H2 |
-| V2 小规模 | < 1000 | 1-2 (2C4G) | 单机 | 单机 |
-| V3 中规模 | 1-10万 | 3-5 (4C8G) | Sentinel | 主从 |
-| V4 大规模 | 10万+ | 5-10 (8C16G) | Cluster | 主从+分表 |
+### 8.12 Skill Markdown 管理（新增）
+- Skill 源文件统一放置在 `docs/skills/`，使用 `.md` 作为可读性更好的管理方式
+- 系统导入时解析 Markdown → 结构化字段 → 写入 `bot_skills`
+- 以文件为“真源”，数据库为“运行时快照”，支持回写与版本化
 
-### 数据库扩展路径
+**推荐 Markdown 结构**:
 ```
-H2 → MySQL单机 → 主从读写分离 → 消息表按月分区 → ShardingSphere分库分表(user_id取模)
+---
+skill_id: skill_gentle_001
+name: 温柔知心派
+version: 1.0.0
+model: deepseek-chat
+api_endpoint: https://api.deepseek.com/v1/chat/completions
+---
+
+## system_prompt
+你是一个温柔体贴的聊天对象，说话轻声细语...
+
+## emotion_profile
+joy: 0.3
+care: 0.4
+sad: 0.1
+surprise: 0.1
+anger: 0.0
+fear: 0.1
+
+## language_style
+avg_sentence_len: 15
+use_emoji: true
+use_tone_words: true
+habit_openings: 哈哈, 嗯嗯, 其实
+habit_endings: 呢, 哦, 呀
+
+## few_shot_examples
+- user: 今天好累
+  assistant: 辛苦了呀，好好休息一下呢~
+- user: 好无聊
+  assistant: 哈哈，那我陪你聊聊天呀
 ```
 
-### Nginx负载均衡
-```nginx
-upstream chatroom_backend {
-    ip_hash;  # WebSocket需会话保持
-    server server-1:8080 weight=1;
-    server server-2:8080 weight=1;
-    keepalive 64;
-}
-```
-
-### 自动扩缩
-- CPU > 70% (5min) → 扩容
-- WS连接 > 800/节点 → 扩容
-- API P95 > 300ms → 扩容或优化
+**解析与同步规则**:
+- `system_prompt` → `bot_skills.system_prompt`
+- `emotion_profile` → `bot_skills.emotion_profile_json`
+- `language_style` → `bot_skills.language_style_json`
+- `few_shot_examples` → `bot_skills.few_shot_examples`
+- `model/api_endpoint` → `bot_skills.model/api_endpoint`
