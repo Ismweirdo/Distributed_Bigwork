@@ -84,30 +84,34 @@ const fileReady = ref(false)
 const importing = ref(false)
 const results = ref([])
 const uploadRef = ref(null)
+const selectedFile = ref(null)
 
 function onOpen() {
   step.value = 1
   fileReady.value = false
   importing.value = false
   results.value = []
+  selectedFile.value = null
 }
 
 function onFileChange(file) {
+  selectedFile.value = file?.raw || file || null
   fileReady.value = true
 }
 
 function onFileRemove() {
+  selectedFile.value = null
   fileReady.value = false
 }
 
 async function doImport() {
-  if (!uploadRef.value?.uploadFiles?.[0]?.raw) {
+  const file = selectedFile.value || uploadRef.value?.uploadFiles?.[0]?.raw || uploadRef.value?.uploadFiles?.[0] || null
+  if (!file) {
     ElMessage.warning('请先选择文件')
     return
   }
   importing.value = true
   try {
-    const file = uploadRef.value.uploadFiles[0].raw
     results.value = await importChatRecords(file)
     step.value = 2
     if (results.value.length > 0) {

@@ -2,6 +2,7 @@ package com.chatroom.controller;
 
 import com.chatroom.common.Result;
 import com.chatroom.model.entity.BotSkill;
+import com.chatroom.security.SecurityUtil;
 import com.chatroom.service.BotManager;
 import com.chatroom.service.ChatRecordImportService;
 import com.chatroom.service.QQChatExporterClient;
@@ -93,7 +94,8 @@ public class BotController {
     @PostMapping("/import")
     public Result<List<Map<String, Object>>> importRecords(@RequestParam("file") MultipartFile file) {
         try {
-            List<Map<String, Object>> results = chatRecordImportService.importAndGenerate(file);
+            Long currentUserId = SecurityUtil.getCurrentUserId();
+            List<Map<String, Object>> results = chatRecordImportService.importAndGenerate(file, currentUserId);
             return Result.ok(results);
         } catch (Exception e) {
             return Result.error(500, "导入失败: " + e.getMessage());

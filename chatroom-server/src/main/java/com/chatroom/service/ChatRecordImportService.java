@@ -1,6 +1,10 @@
 package com.chatroom.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.chatroom.common.Constants;
+import com.chatroom.mapper.FriendMapper;
 import com.chatroom.model.entity.BotSkill;
+import com.chatroom.model.entity.Friend;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +24,7 @@ import java.util.stream.Collectors;
 public class ChatRecordImportService {
 
     private final BotManager botManager;
+    private final FriendMapper friendMapper;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Emotion dictionary
@@ -52,7 +57,7 @@ public class ChatRecordImportService {
      * Import chat records and generate bots.
      * Supports: QQ Chat Exporter JSON, QQCE TXT, WeChat TXT, JSONL, generic JSON
      */
-    public List<Map<String, Object>> importAndGenerate(MultipartFile file) throws Exception {
+    public List<Map<String, Object>> importAndGenerate(MultipartFile file, Long currentUserId) throws Exception {
         String filename = file.getOriginalFilename();
         String content = new String(file.getBytes(), StandardCharsets.UTF_8);
 
@@ -73,7 +78,7 @@ public class ChatRecordImportService {
         }
 
         log.info("Parsed {} messages from {}", messages.size(), filename);
-        return generateBots(messages);
+        return generateBots(messages, currentUserId);
     }
 
     // ==================== JSON Parsing ====================
@@ -285,7 +290,7 @@ public class ChatRecordImportService {
 
     // ==================== Bot Generation ====================
 
-    private List<Map<String, Object>> generateBots(List<Map<String, String>> messages) {
+    private List<Map<String, Object>> generateBots(List<Map<String, String>> messages, Long currentUserId) {
         Map<String, List<String>> bySender = messages.stream()
                 .collect(Collectors.groupingBy(
                         m -> m.get("sender"),
@@ -318,6 +323,7 @@ public class ChatRecordImportService {
                         username, senderName, "导入_" + senderName,
                         systemPrompt, "[]", emotionJson, styleJson,
                         null, null, null);
+                ensureFriendRelation(currentUserId, skill.getBotUserId());
 
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("botUserId", skill.getBotUserId());
@@ -337,6 +343,28 @@ public class ChatRecordImportService {
 
         log.info("Generated {} bots from imported records", results.size());
         return results;
+    }
+
+    private void ensureFriendRelation(Long currentUserId, Long botUserId) {
+        if (currentUserId == null || botUserId == null) return;
+
+        LambdaQueryWrapper<Friend> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Friend::getUserId, currentUserId)
+                .eq(Friend::getFriendId, botUserId);
+        Friend existing = friendMapper.selectOne(wrapper);
+        if (existing != null) {
+            if (existing.getStatus() != Constants.FRIEND_STATUS_ACCEPTED) {
+                existing.setStatus(Constants.FRIEND_STATUS_ACCEPTED);
+                friendMapper.updateById(existing);
+            }
+            return;
+        }
+
+        Friend relation = new Friend();
+        relation.setUserId(currentUserId);
+        relation.setFriendId(botUserId);
+        relation.setStatus(Constants.FRIEND_STATUS_ACCEPTED);
+        friendMapper.insert(relation);
     }
 
     // ==================== Feature Extraction ====================
