@@ -1,6 +1,6 @@
 # Skill Markdown 管理
 
-本目录用于存放 Skill 的 Markdown 源文件，作为“真源”，系统导入后写入数据库表 `bot_skills`。
+本目录用于存放 Skill  Markdown 源文件，作为“真源”，系统导入后写入数据库表 `bot_skills`。
 
 ## 目录约定
 - 一个 Skill 对应一个 `.md` 文件

@@ -79,7 +79,7 @@
 
 ## 机器人与Skill（重点）
 
-### Skill 如何设计
+### Skill设计
 - Skill = System Prompt + Few-shot 示例 + 语言风格/情绪配置
 - 生成来源：手动创建 / 导入聊天记录 / 数据库蒸馏
 - 入口形式：UI创建与API创建同时支持
