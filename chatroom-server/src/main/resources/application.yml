@@ -1,0 +1,69 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: chatroom-server
+
+  # H2 demo database
+  datasource:
+    driver-class-name: org.h2.Driver
+    url: jdbc:h2:file:./data/chatroom;DB_CLOSE_DELAY=-1;MODE=MySQL
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  # Switch to MySQL for production:
+  # datasource:
+  #   driver-class-name: com.mysql.cj.jdbc.Driver
+  #   url: jdbc:mysql://localhost:3306/chatroom?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf-8
+  #   username: root
+  #   password: root
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:sql/schema.sql
+
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+jwt:
+  secret: Y2hhdHJvb20tc2VjcmV0LWtleS1mb3Itand0LXRva2VuLWdlbmVyYXRpb24tMjAyNA==
+  expiration: 604800000  # 7 days in milliseconds
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+logging:
+  level:
+    com.chatroom: debug
+
+# Bot configuration
+# Set API key via environment variable: export BOT_API_KEY=sk-your-key
+# Or paste directly below (not recommended for production)
+bot:
+  default-api-key: ${BOT_API_KEY:}
+  default-api-endpoint: ${BOT_API_ENDPOINT:https://api.deepseek.com/v1/chat/completions}
+  default-model: ${BOT_API_MODEL:deepseek-chat}
+
+qqce:
+  access-token: ${QQCE_ACCESS_TOKEN:}
