@@ -348,9 +348,12 @@ watch(activeTab, () => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .contact-tabs :deep(.el-tabs__header) {
+  flex-shrink: 0;
   padding: 0 16px;
   margin-bottom: 0;
 }
@@ -361,7 +364,13 @@ watch(activeTab, () => {
 
 .contact-tabs :deep(.el-tabs__content) {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding-right: 4px;
+}
+
+.contact-tabs :deep(.el-tab-pane) {
+  min-height: 0;
 }
 
 .contact-item {
@@ -491,5 +500,23 @@ watch(activeTab, () => {
 .empty-hint-desc {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+/* Scrollbar styling */
+.contact-tabs :deep(.el-tabs__content)::-webkit-scrollbar {
+  width: 5px;
+}
+
+.contact-tabs :deep(.el-tabs__content)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.contact-tabs :deep(.el-tabs__content)::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 10px;
+}
+
+.contact-tabs :deep(.el-tabs__content)::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 </style>

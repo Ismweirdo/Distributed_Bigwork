@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 
 @Slf4j
 @Controller
@@ -43,6 +44,9 @@ public class ChatWebSocketHandler {
     private final FriendMapper friendMapper;
     private final OnlineStatusManager onlineStatusManager;
     private final BotManager botManager;
+
+    @org.springframework.beans.factory.annotation.Qualifier("botTaskExecutor")
+    private final Executor botTaskExecutor;
 
     // sessionId -> userId
     private final ConcurrentHashMap<String, Long> sessionUserMap = new ConcurrentHashMap<>();
@@ -152,7 +156,7 @@ public class ChatWebSocketHandler {
             } catch (Exception e) {
                 log.error("Bot {} reply error", botUserId, e);
             }
-        });
+        }, botTaskExecutor);
     }
 
     private void handleGroupBotReply(Long senderId, Long groupId, String content, MessageVO userMessage) {
@@ -177,7 +181,7 @@ public class ChatWebSocketHandler {
                     }
                 }
             }
-        });
+        }, botTaskExecutor);
     }
 
     private void pushBotMessage(Long botUserId, Long targetId, String content, int messageType) {

@@ -8,10 +8,24 @@
         </el-avatar>
         <div class="chat-title-wrap">
           <div class="chat-title">{{ targetName }}</div>
-          <div class="chat-subtitle">{{ type === 'group' ? '群聊' : '在线' }}</div>
+          <div class="chat-subtitle">{{ isBot ? 'AI 机器人' : (type === 'group' ? '群聊' : '在线') }}</div>
         </div>
       </div>
       <div class="chat-header-actions">
+        <template v-if="isBot">
+          <div class="active-mode-toggle" :class="{ active: activeModeEnabled }">
+            <span class="toggle-label">主动聊天</span>
+            <el-switch v-model="activeModeEnabled" size="small" @change="onActiveToggle" :loading="activeModeLoading" />
+          </div>
+          <el-select v-if="activeModeEnabled" v-model="activeInterval" size="small" class="interval-select"
+            @change="onIntervalChange" :disabled="activeModeLoading">
+            <el-option :value="15" label="15秒" />
+            <el-option :value="30" label="30秒" />
+            <el-option :value="60" label="1分钟" />
+            <el-option :value="120" label="2分钟" />
+            <el-option :value="300" label="5分钟" />
+          </el-select>
+        </template>
         <button class="header-action-btn">
           <el-icon><Phone /></el-icon>
         </button>
@@ -77,8 +91,10 @@
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { useUserStore } from '../store/user'
 import { useChatStore } from '../store/chat'
+import { useContactStore } from '../store/contact'
 import { sendChatMessage, subscribeGroupMessages, unsubscribeGroupMessages } from '../utils/websocket'
 import { recallMessage } from '../api/message'
+import { setActiveMode, getActiveMode } from '../api/bot'
 import { ElMessage } from 'element-plus'
 import { Phone, VideoCamera, More, Close, Paperclip, Picture, ArrowRight } from '@element-plus/icons-vue'
 import MessageBubble from './MessageBubble.vue'
@@ -91,11 +107,22 @@ const props = defineProps({
 
 const userStore = useUserStore()
 const chatStore = useChatStore()
+const contactStore = useContactStore()
 const input = ref('')
 const replyingTo = ref(null)
 const msgContainer = ref(null)
 const msgEnd = ref(null)
 const loading = ref(false)
+
+// Active mode state
+const activeModeEnabled = ref(false)
+const activeInterval = ref(60)
+const activeModeLoading = ref(false)
+
+const isBot = computed(() => {
+  const friend = contactStore.friendList.find(f => f.friendId === props.targetId)
+  return friend?.isBot === 1
+})
 
 const STORAGE_KEY = 'chat-background'
 
@@ -128,8 +155,46 @@ async function loadHistory() {
   }
 }
 
+async function fetchActiveMode() {
+  if (!isBot.value) return
+  try {
+    const res = await getActiveMode(props.targetId)
+    // Response interceptor already unwrapped data: res = { enabled, intervalSeconds }
+    activeModeEnabled.value = res?.enabled ?? false
+    activeInterval.value = res?.intervalSeconds ?? 60
+  } catch {
+    activeModeEnabled.value = false
+  }
+}
+
+async function onActiveToggle(val) {
+  activeModeLoading.value = true
+  try {
+    await setActiveMode(props.targetId, val, activeInterval.value)
+    ElMessage.success(val ? '已开启主动聊天模式' : '已关闭主动聊天模式，机器人仅被动回复')
+  } catch {
+    activeModeEnabled.value = !val
+    ElMessage.error('操作失败')
+  } finally {
+    activeModeLoading.value = false
+  }
+}
+
+async function onIntervalChange(val) {
+  if (!activeModeEnabled.value) return
+  activeModeLoading.value = true
+  try {
+    await setActiveMode(props.targetId, true, val)
+  } catch {
+    ElMessage.error('更新间隔失败')
+  } finally {
+    activeModeLoading.value = false
+  }
+}
+
 onMounted(() => {
   loadHistory()
+  fetchActiveMode()
   if (props.type === 'group') {
     subscribeGroupMessages(props.targetId)
   }
@@ -144,6 +209,7 @@ onUnmounted(() => {
 // Watch for target changes (switching contacts)
 watch(() => props.targetId, () => {
   loadHistory()
+  fetchActiveMode()
   if (props.type === 'group') {
     subscribeGroupMessages(props.targetId)
   }
@@ -277,6 +343,36 @@ function generateUUID() {
 .header-action-btn:hover {
   background: var(--bg-hover);
   color: var(--primary-color);
+}
+
+.active-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  transition: all 0.3s ease;
+}
+
+.active-mode-toggle.active {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
+}
+
+.toggle-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: color 0.3s ease;
+}
+
+.active-mode-toggle.active .toggle-label {
+  color: var(--primary-color);
+}
+
+.interval-select {
+  width: 90px;
 }
 
 .chat-messages {

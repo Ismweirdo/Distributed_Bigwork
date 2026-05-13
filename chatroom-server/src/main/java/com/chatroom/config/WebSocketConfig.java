@@ -23,6 +23,13 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Raw WebSocket endpoint (no SockJS) — used by test scripts and non-browser clients
+        registry.addEndpoint("/ws/chat")
+                .setAllowedOriginPatterns("*")
+                .addInterceptors(authHandshakeInterceptor)
+                .setHandshakeHandler(handshakeHandler());
+
+        // SockJS endpoint — used by browser clients
         registry.addEndpoint("/ws/chat")
                 .setAllowedOriginPatterns("*")
                 .addInterceptors(authHandshakeInterceptor)

@@ -356,10 +356,11 @@ public class ChatRecordImportService {
 
             try {
                 String username = "imp_" + sanitize(senderName) + "_" + (System.currentTimeMillis() % 10000);
-                BotSkill skill = botManager.registerBot(
+                Map<String, Object> regResult = botManager.registerBot(
                         username, senderName, "导入_" + senderName,
                         systemPrompt, fewShotJson, emotionJson, styleJson,
-                        null, null, null);
+                        null, null, null, null);
+                BotSkill skill = (BotSkill) regResult.get("skill");
 
                 // Auto-create friend relationship so bot appears in contact list
                 // Only one record: creatorUserId -> botUserId (matching the normal friend flow)

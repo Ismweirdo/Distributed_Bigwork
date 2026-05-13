@@ -54,6 +54,17 @@ public class FriendServiceImpl implements FriendService {
             }
         }
 
+        // If target is a bot, auto-accept the friend request
+        User targetUser = userMapper.selectById(friendId);
+        if (targetUser != null && targetUser.getIsBot() != null && targetUser.getIsBot() == 1) {
+            Friend friend = new Friend();
+            friend.setUserId(userId);
+            friend.setFriendId(friendId);
+            friend.setStatus(Constants.FRIEND_STATUS_ACCEPTED);
+            friendMapper.insert(friend);
+            return;
+        }
+
         Friend friend = new Friend();
         friend.setUserId(userId);
         friend.setFriendId(friendId);

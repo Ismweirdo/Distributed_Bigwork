@@ -58,3 +58,12 @@ export function getQQGroups(token) {
 export function qqImportBots(data, token) {
   return request.post('/bots/qq/import', data, { headers: qqceHeaders(token) })
 }
+
+// Active mode
+export function setActiveMode(botUserId, enabled, intervalSeconds) {
+  return request.put(`/bots/${botUserId}/active-mode`, { enabled, intervalSeconds })
+}
+
+export function getActiveMode(botUserId) {
+  return request.get(`/bots/${botUserId}/active-mode`)
+}

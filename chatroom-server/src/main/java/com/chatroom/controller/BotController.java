@@ -54,8 +54,8 @@ public class BotController {
     }
 
     @PostMapping("/register")
-    public Result<BotSkill> register(@RequestBody Map<String, String> body) {
-        BotSkill skill = botManager.registerBot(
+    public Result<Map<String, Object>> register(@RequestBody Map<String, String> body) {
+        Map<String, Object> result = botManager.registerBot(
                 body.get("username"),
                 body.get("nickname"),
                 body.get("skillName"),
@@ -65,8 +65,9 @@ public class BotController {
                 body.get("languageStyle"),
                 body.get("apiEndpoint"),
                 body.get("apiKey"),
-                body.get("model"));
-        return Result.ok(skill);
+                body.get("model"),
+                body.get("password"));
+        return Result.ok(result);
     }
 
     @DeleteMapping("/{userId}")
@@ -88,6 +89,38 @@ public class BotController {
     @GetMapping("/count")
     public Result<Integer> count() {
         return Result.ok(botManager.getOnlineBotCount());
+    }
+
+    // ==================== Active Mode ====================
+
+    @PutMapping("/{botUserId}/active-mode")
+    public Result<Map<String, Object>> setActiveMode(
+            @PathVariable Long botUserId,
+            @RequestBody Map<String, Object> body) {
+        boolean enabled = Boolean.TRUE.equals(body.get("enabled"));
+        int intervalSeconds = body.get("intervalSeconds") instanceof Number n
+                ? n.intValue() : 60;
+        BotManager.ActiveModeConfig config = botManager.setActiveMode(botUserId, enabled, intervalSeconds);
+        return Result.ok(Map.of(
+            "botUserId", botUserId,
+            "enabled", config.enabled,
+            "intervalSeconds", config.intervalSeconds
+        ));
+    }
+
+    @GetMapping("/{botUserId}/active-mode")
+    public Result<Map<String, Object>> getActiveMode(@PathVariable Long botUserId) {
+        BotManager.ActiveModeConfig config = botManager.getActiveModeConfig(botUserId);
+        return Result.ok(Map.of(
+            "botUserId", botUserId,
+            "enabled", config.enabled,
+            "intervalSeconds", config.intervalSeconds
+        ));
+    }
+
+    @GetMapping("/active-mode/list")
+    public Result<Map<String, Object>> activeModeList() {
+        return Result.ok(botManager.getAllActiveModeInfos());
     }
 
     @PostMapping("/distill")

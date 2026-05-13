@@ -1,310 +1,342 @@
 # Chatroom 聊天室 — 技术设计文档
 
-> v2.1 | 2026-05-06
+> v3.0 | 2026-05-13
 
-## 1. 系统架构
+> **v3.0 重写**: 聚焦Bot架构设计、并发控制、负载均衡、网络风暴防护。用户聊天为基础层，一笔带过。
 
-```
-┌──────────┐     ┌─────────────────────────┐     ┌──────────┐
-│ Browser  │────▶│ Spring Boot Server(8080)│────▶│  MySQL   │
-│ (Vue 3)  │◀────│ ├ REST API              │◀────│          │
-│          │     │ ├ WebSocket (STOMP)      │     └──────────┘
-│ SockJS/  │     │ ├ Spring Security + JWT  │
-│ STOMP.js │     │ └ MyBatis-Plus           │
-└──────────┘     └─────────────────────────┘
-```
-
-### 生产环境扩展架构
-```
-                 ┌──────────┐  ┌──────────┐  ┌──────────────┐
-                 │  Redis   │  │ RabbitMQ │  │  LLM API群   │
-                 │(缓存/Pub)│  │(消息队列)│  │(多Key多模型)  │
-                 └──────────┘  └──────────┘  └──────────────┘
-                      ▲             ▲               ▲
-                      │             │               │
-┌──────────┐  ┌──────────────────────────────┐  ┌──────────┐
-│ Browser  │◀▶│  Spring Boot Cluster         │◀▶│  MySQL   │
-│          │  │  + Bot Manager (N个机器人)    │  │  (主从)  │
-└──────────┘  └──────────────────────────────┘  └──────────┘
-```
-
-## 2. 数据库设计
-
-### 核心表
-- `users` — (id, username, password, nickname, avatar, status, is_bot, last_login_time, created_at)
-- `friends` — (id, user_id, friend_id, status, created_at)
-- `groups` — (id, name, avatar, owner_id, announcement, max_members, created_at)
-- `group_members` — (id, group_id, user_id, role, joined_at)
-- `messages` — (id, message_type, sender_id, target_id, reply_to_id, content, content_type, status, client_message_id, created_at)
-- `bot_skills` — (id, bot_user_id, skill_config_json, api_endpoint, api_key_hash, status, error_count, created_at)
-
-### 消息表索引
-- PRIMARY KEY (id) — 全局自增，保证消息顺序
-- UNIQUE INDEX idx_client_msg (client_message_id) — 幂等去重
-- INDEX idx_target_time (message_type, target_id, created_at) — 会话查询
-- INDEX idx_created_at (created_at) — 定时清理
-
-## 3. 实时通信设计
-
-### WebSocket 连接流程
-1. 客户端 SockJS 连接 `/ws/chat?token={jwt}`
-2. 握手拦截器验证 JWT，提取 userId
-3. 订阅 `/user/queue/private/chat`（私聊）和 `/topic/group/{id}`（群聊）
-4. 发送消息通过 `/app/chat.send`
-
-### 消息协议
-```json
-// Client → Server
-{
-  "content": "...", "messageType": 0, "targetId": 2,
-  "replyToId": null, "contentType": 0, "clientMessageId": "uuid"
-}
-// Server → Client  
-{
-  "type": "CHAT", "messageId": 12345, "messageType": 0,
-  "senderId": 1, "senderName": "Alice", "targetId": 2,
-  "content": "...", "createdAt": "2026-05-05T12:00:00"
-}
-```
-
-### 消息可靠性
-1. 客户端发送 → 服务端推送+持久化 → 返回ACK
-2. 接收方在线 → 实时推送；离线 → 上线后从DB拉取
-3. clientMessageId 去重: 布隆过滤器 → Redis → DB唯一索引 三层校验
-
-## 4. 高并发设计
-
-### 缓存策略 (10万用户规模)
-| 缓存项 | 类型 | TTL |
-|--------|------|-----|
-| 在线状态 | Redis Hash | 心跳30s续期 |
-| 最近消息 | Redis ZSet | 1h |
-| JWT Session | Redis String | 7d |
-| 好友列表 | Redis Set | 30min |
-| 群成员 | Redis Set | 10min |
-| 限流计数 | Redis String INCR | 窗口制 |
-
-### 限流
-- WebSocket: 每IP 5个连接
-- 消息发送: 每用户 10条/s，每IP 100条/s
-- API: Guava RateLimiter (单机) / Sentinel (分布式)
-
-### 异步处理
-- 消息先推后存: WS推送 → 异步写DB (批量: 100条/500ms)
-- 生产环境: WS → RabbitMQ → Batch Insert DB
-
-## 5. 消息一致性
-
-### 幂等设计
-clientMessageId (UUID v4) → 布隆过滤器快速判定 → Redis去重缓存(24h) → DB UNIQUE索引兜底。重复消息返回已有messageId，不重复推送。
-
-### 消息有序
-DB自增ID作为全局单调递增排序依据，避免NTP时钟回拨问题。
-
-### 消息状态机
-```
-SENDING → SENT → DELIVERED → READ
-              ↘ FAILED (30s超时，重试3次)
-```
-
-### 群组广播
-先写DB → 在线成员实时推送 → 离线成员 Redis 记录未读计数。500人大群采用异步分批推送，避免广播风暴。
-
-## 6. Redis 架构
-
-### 数据结构
-| Key | 类型 | 用途 |
-|-----|------|------|
-| `user:online:{id}` | String | 在线状态+所在节点 |
-| `msg:dedup:{clientId}` | String | 去重(24h) |
-| `msg:recent:{type}:{targetId}` | ZSet | 最近消息缓存 |
-| `bot:status:{botId}` | Hash | 机器人状态/错误计数 |
-
-### Pub/Sub 跨节点通信
-```
-Node-1 ──publish──▶ Redis ──subscribe──▶ Node-2
-Channels: ws:user:{id} | ws:group:{id} | ws:system | ws:bot
-```
-
-### 高可用
-Sentinel 1主2从3哨兵，RDB+AOF持久化，故障转移 < 30s。扩展路径: Redis Cluster 16K槽位分片。
-
-## 7. 安全设计
-- 密码: BCrypt (cost=10)
-- 认证: JWT HMAC-SHA256，7天过期
-- API: Spring Security + @PreAuthorize
-- WebSocket: 握手阶段JWT验证
-- 防护: 前端XSS过滤 + MyBatis参数化防注入
-
-## 8. 聊天记录蒸馏 — 多机器人Skill系统
-
-### 8.1 设计目标
-从真实聊天记录中**提取语言风格和情绪模式**作为Skill，不涉及模型训练。每个Skill = System Prompt + Few-shot Examples。支持两种数据来源：
-- **数据库蒸馏**: 定时任务分析30天聊天记录
-- **文件导入**: 用户上传聊天记录文件，即时生成机器人
-
-### 8.2 Skill生命周期与生成
-- 创建方式: 手动编辑 / 文件导入 / 数据库蒸馏
-- 入口形式: UI创建与API创建同时支持
-- 预览校验: 生成“人设摘要”和示例对话用于确认
-- 版本管理: Skill配置按版本存档，可回滚
-- 绑定关系: 1个Bot绑定1个Skill，支持一键切换Skill
-
-### 8.3 导入聊天记录格式
-优先支持JSONL（每行一个JSON对象）与JSON数组、TXT（微信/QQ导出格式 `昵称: 消息`）。每条记录需包含 `sender`（发送者）和 `content`（消息内容）。
-
-**QQ/微信解析适配**:
-- 优先支持JSON/TXT导出文件，HTML作为可选扩展
-- 提供字段映射（昵称、群名、时间戳、消息类型）
-- 统一转换为内部 `ChatLogEntry` 结构
-
-```json
-{
-  "sender": "Alice",
-  "content": "今天好累",
-  "timestamp": "2026-05-01T10:00:00",
-  "channel": "group",
-  "source": "wechat"
-}
-```
-
-### 8.4 蒸馏流水线
-
-```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│ 数据导出  │───▶│ 用户聚类  │───▶│ 特征提取  │───▶│ Skill生成 │
-│ (30天)   │    │ (按sender)│    │(情绪/句式│    │(Prompt+  │
-│          │    │          │    │ /用词)   │    │ Examples)│
-└──────────┘    └──────────┘    └──────────┘    └─────┬────┘
-                                                      │
-                                                      ▼
-                                               ┌──────────┐
-                                               │ 注册机器人 │
-                                               │ (20+Bot) │
-                                               └──────────┘
-```
-
-### 8.5 特征提取 (纯数据分析，不训练)
-
-**情绪分布提取**:
-- 扫描用户所有消息，基于情绪词典统计 喜/怒/哀/惊/恐/厌 六维分布
-- 统计语气助词使用频率 (呢/哦/呀/吧/嘛/哈)
-- 统计Emoji和表情包使用偏好
-
-**句式模式提取**:
-- 平均句长、句长方差
-- 问句/感叹句/陈述句比例
-- 高频开头词和结尾词
-
-**用词偏好提取**:
-- TF-IDF提取Top 50高频词
-- 统计叠词、网络用语、英文混用比例
-
-**对话节奏提取**:
-- 平均回复字数、回复延迟分布
-- 是否倾向承接上文 vs 开启新话题
-
-### 8.6 Skill配置
-```json
-{
-  "skill_id": "skill_001",
-  "name": "温柔知心派",
-  "emotion_profile": {
-    "base_tone": "温和",
-    "distribution": {"joy": 0.3, "care": 0.4, "sad": 0.1, "surprise": 0.1, "anger": 0.0, "fear": 0.1}
-  },
-  "language_style": {
-    "avg_sentence_len": 15,
-    "use_emoji": true,
-    "habit_openings": ["哈哈", "嗯嗯", "其实"],
-    "habit_endings": ["呢", "哦", "呀"]
-  },
-  "system_prompt": "你是一个温柔体贴的聊天对象，说话轻声细语，喜欢用'呢'和'哦'结尾。回答时总是先安慰对方情绪，再慢慢聊开...",
-  "few_shot_examples": [
-    {"role": "user", "content": "今天好累"},
-    {"role": "assistant", "content": "辛苦了呀，好好休息一下呢~"},
-    {"role": "user", "content": "好无聊"},
-    {"role": "assistant", "content": "哈哈，那我陪你聊聊天呀，想聊什么呢？"}
-  ]
-}
-```
-
-### 8.7 AI导入与多厂商接入
-- Bot配置包含 `api_endpoint`、`api_key`、`model` 与 `skill_id`
-- 每个Bot独立Key，隔离调用失败
-- 支持同厂商多Key与多模型混合部署
-
-### 8.8 多机器人并发管理
-
-```
-                     ┌─────────────────┐
-                     │   Bot Manager   │
-                     │                 │
-                     │ botList: [      │
-                     │  {id:1,skill:A, │
-                     │   api:"openai", │
-                     │   key:"sk-xxx"} │
-                     │  {id:2,skill:B, │
-                     │   api:"qwen",   │
-                     │   key:"sk-yyy"} │
-                     │  ...x20        │
-                     │ ]               │
-                     └────────┬────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-         ┌────▼───┐     ┌────▼───┐     ┌────▼───┐
-         │ Bot-1  │     │ Bot-2  │     │ Bot-20 │
-         │ WS连接  │     │ WS连接  │     │ WS连接  │
-         │ API-A  │     │ API-B  │     │ API-X  │
-         └────────┘     └────────┘     └────────┘
-```
-
-**并发控制策略**:
-```
-信号量(per Bot)=1 → 同一Bot串行处理消息，避免状态混乱
-消息队列(per Bot)=10 → 超出丢弃最旧，防止堆积
-熔断器: 连续3次失败 → 静默30s → 半开探测 → 恢复或继续熔断
-```
-
-### 8.9 错误隔离与容错
-
-| 故障场景 | 处理方式 | 影响范围 |
-|---------|---------|---------|
-| 单个Bot API超时 | 熔断该Bot 30s，返回静默 | 仅该Bot |
-| 单个Bot API Key失效 | 标记INACTIVE，告警通知 | 仅该Bot |
-| 某厂商API全面故障 | 使用该厂商的所有Bot熔断 | 使用该厂商的Bot |
-| Bot Manager宕机 | Bot账号WS断连，在线用户列表移除 | 所有Bot暂时离线 |
-
-**错误率保障**:
-- 每个Bot独立API Key，故障隔离
-- 支持多厂商 (OpenAI / Qwen / ChatGLM / DeepSeek等)，分散风险
-- 20个Bot分散到至少3个不同API厂商
-- Bot错误率 < 0.1%: 即每1000条消息中 < 1次API错误
-
-### 8.10 监控指标
-| 指标 | 采集 | 告警阈值 |
-|------|------|---------|
-| Bot回复延迟 | Bot Manager | > 3s (P95) |
-| Bot错误率 | 错误计数/总消息 | > 5%/min |
-| Bot在线数 | 心跳检测 | < 20 |
-| API调用频率 | 各API厂商 | 接近限频上限 |
-
-### 8.11 测试设计（重点覆盖机器人）
-- **并发测试**: 作为重点，20+ Bot同时在线，验证延迟/错误率/熔断
-- **单元测试**: Skill特征提取、导入解析、字段映射、配置生成
-- **集成测试**: 导入文件 → 生成Skill → 注册Bot → WS在线
-- **回归测试**: 技能版本回滚、Bot切换Skill、API Key失效
-
-### 8.12 Skill Markdown 管理（新增）
-- Skill 源文件统一放置在 `docs/skills/`，使用 `.md` 作为可读性更好的管理方式
-- 系统导入时解析 Markdown → 结构化字段 → 写入 `bot_skills`
-- 以文件为“真源”，数据库为“运行时快照”，支持回写与版本化
-
-**推荐 Markdown 结构**:
-```
 ---
-skill_id: skill_gentle_001
+
+## 1. 系统总览
+
+### 1.1 架构分层
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Frontend (Vue 3)                          │
+│  SockJS/STOMP.js  ←→  WebSocket  ←→  REST API               │
+└──────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────▼────────────────────────────────┐
+│              Spring Boot Server (8080)                       │
+│  ┌──────────────────┐  ┌──────────────────────────────┐     │
+│  │  用户聊天层 (基础) │  │       Bot 引擎层 (核心)       │     │
+│  │  - 消息路由      │  │  - BotManager (生命周期)      │     │
+│  │  - 在线状态      │  │  - Skill 蒸馏 & 导入          │     │
+│  │  - 好友/群组     │  │  - LLM API Client           │     │
+│  │  - JWT 认证      │  │  - 并发控制 (信号量/熔断/队列) │     │
+│  └──────────────────┘  │  - 主动模式调度               │     │
+│                         └──────────────────────────────┘     │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │           Thread Pool Layer                          │    │
+│  │  botTaskExecutor (4/20/200)  │  taskScheduler (4)    │    │
+│  └──────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+┌───────▼──────┐  ┌───────────▼──────┐  ┌─────────▼─────────┐
+│  MySQL 8.0  │  │  Redis Cluster  │  │  RabbitMQ Cluster │
+│  (H2 Demo)  │  │  (Pub/Sub+缓存)  │  │  (消息队列)        │
+└──────────────┘  └─────────────────┘  └───────────────────┘
+        │                     │
+        │         ┌───────────▼──────────────────────┐
+        │         │  LLM API 集群 (多厂商)            │
+        │         │  DeepSeek │ OpenAI │ Qwen │ GLM  │
+        │         │   (每Bot独立API Key)              │
+        │         └──────────────────────────────────┘
+```
+
+### 1.2 用户聊天层
+
+用户聊天为标准IM功能栈：
+
+| 层 | 组件 | 职责 |
+|----|------|------|
+| 认证 | `AuthHandshakeInterceptor` + JWT | WebSocket握手验证 + REST API Spring Security |
+| 路由 | `ChatWebSocketHandler` | `@MessageMapping("/chat.send")` → 消息分发 |
+| 持久化 | `MessageService.sendAndSaveMessage()` | 消息入库 + clientMessageId去重 |
+| 推送 | `SimpMessagingTemplate` | `/user/queue/private/chat`、`/topic/group/{id}` |
+| 在线 | `OnlineStatusManager` | `ConcurrentHashMap` 管理session→userId，心跳30s |
+
+消息流向：客户端 → STOMP `/app/chat.send` → `handleChatMessage()` → 持久化 + 推送双方 + [Bot检测]
+
+---
+
+## 2. Bot 引擎核心设计
+
+### 2.1 BotManager — 生命周期管理
+
+`BotManager` 是整个Bot系统的中枢，管理Bot的全生命周期：
+
+```
+registerBot()        创建users记录(is_bot=1) + bot_skills记录 + Skill文档导出
+     │
+     ▼
+[ACTIVE 运行中]
+     │
+     ├── handleBotMessage()    被动回复：接收用户消息 → LLM推理 → 推送回复
+     ├── processActiveBots()   主动模式：定时生成开场白 → 推送给随机好友
+     │
+     ▼
+deactivateBot()       设置status=INACTIVE，清理内存结构
+     │
+     ▼
+permanentDelete()     删除users + bot_skills + friends + Skill文档
+```
+
+**核心数据结构**（全部 `ConcurrentHashMap`，线程安全）：
+
+```java
+// 每Bot并发控制
+ConcurrentHashMap<Long, Semaphore> botSemaphores     // permit=1
+// 每Bot消息缓冲队列
+ConcurrentHashMap<Long, LinkedList<Map>> botQueues   // max=10
+// 每Bot熔断器状态
+ConcurrentHashMap<Long, Boolean> circuitBreakers     // true=OPEN
+ConcurrentHashMap<Long, Long> circuitOpenTime        // 打开时间戳
+// 每Bot主动模式配置
+ConcurrentHashMap<Long, ActiveModeConfig> activeModeConfigs
+```
+
+### 2.2 消息处理流程（详细）
+
+```
+WebSocket 入站线程 (Tomcat NIO)
+  │
+  │  handleChatMessage(dto, principal)
+  │
+  ├── 1. messageService.sendAndSaveMessage()
+  │      ├── 生成 clientMessageId (UUID)
+  │      ├── INSERT messages表
+  │      └── 返回 MessageVO (含自增ID)
+  │
+  ├── 2. WebSocket 即时推送
+  │      ├── 私聊: convertAndSendToUser(sender) + convertAndSendToUser(target)
+  │      └── 群聊: convertAndSend("/topic/group/{id}")
+  │
+  └── 3. Bot 检测与路由 (异步)
+         │
+         ├── 私聊: targetUser.is_bot == 1 ?
+         │   └── CompletableFuture.runAsync(
+         │           () -> handleBotReply(senderId, botUserId, msgVO),
+         │           botTaskExecutor)
+         │
+         └── 群聊: content contains "@botNickname" ?
+             └── CompletableFuture.runAsync(
+                     () -> 遍历bots → @mention匹配 → handleBotReplyEach,
+                     botTaskExecutor)
+```
+
+**Bot回复子流程** (`handleBotReply`):
+
+```
+botTaskExecutor 线程
+  │
+  ├── 1. botManager.handleBotMessage(botUserId, senderId, senderName, content)
+  │      │
+  │      ├── 1.1 获取 BotSkill (DB查bot_skills)
+  │      ├── 1.2 熔断器检查
+  │      │      └── circuitBreakers.get(botUserId)==true?
+  │      │          ├── Yes + 未到30s → return null (静默)
+  │      │          └── Yes + 已到30s → HALF-OPEN → 放行探测
+  │      ├── 1.3 信号量获取 tryAcquire()
+  │      │      ├── 成功 → 执行LLM调用
+  │      │      └── 失败 → enqueueMessage(入队最多10条) → return null
+  │      ├── 1.4 LLM API 调用
+  │      │      └── llmApiClient.chat(endpoint, key, model, systemPrompt, messages)
+  │      │           ├── 成功 → errorCount=0, status=ACTIVE, return reply
+  │      │           └── 失败/异常 → recordError(botUserId, skill)
+  │      │                └── errorCount >= 3? → 熔断OPEN
+  │      ├── 1.5 sem.release() → processQueue() [异步处理排队消息]
+  │      └── 1.6 return reply (or null)
+  │
+  └── 2. reply != null ?
+         └── pushBotMessage(botUserId, targetId, reply)
+              ├── sendAndSaveMessage(botUserId, dto)
+              └── WS推送双方 (target + botUserId)
+```
+
+### 2.3 排队消息处理
+
+```
+handleBotMessage 释放信号量后
+  │
+  └── processQueue(botUserId)
+       │
+       └── queue.poll() → 有排队消息?
+           └── CompletableFuture.runAsync(() -> {
+                   handleBotMessage(botUserId, senderId, senderName, content)
+                   // 如果产生回复 → pushBotReply
+               }, botTaskExecutor)
+```
+
+排队消息也是异步处理，不阻塞当前LLM调用完成后的信号量释放。如果排队消息也产生了队列溢出（极端情况），会被静默丢弃。
+
+### 2.4 熔断器实现
+
+```java
+// 状态判断:
+if (circuitBreakers.get(botUserId) == true) {
+    if (System.currentTimeMillis() - circuitOpenTime.get(botUserId) 
+        < BOT_CIRCUIT_BREAK_SILENCE_MS) {  // 30,000ms
+        return null;  // 仍在静默期，不调用LLM
+    }
+    // 超时，进入HALF-OPEN状态，允许一次探测
+    circuitBreakers.put(botUserId, false);
+}
+
+// 错误累计:
+void recordError(botUserId, skill) {
+    int errors = skill.getErrorCount() + 1;
+    skill.setErrorCount(errors);
+    if (errors >= BOT_CIRCUIT_BREAK_THRESHOLD) {  // 3
+        circuitBreakers.put(botUserId, true);
+        circuitOpenTime.put(botUserId, System.currentTimeMillis());
+        skill.setStatus(BOT_STATUS_CIRCUIT_BROKEN);  // 2
+    }
+}
+
+// 成功后重置:
+skill.setErrorCount(0);
+skill.setStatus(BOT_STATUS_ACTIVE);
+// 熔断器不再OPEN（handleBotMessage在成功时不清除circuitBreakers，
+// 但HALF-OPEN探测成功后circuitBreakers保持false → CLOSED）
+```
+
+关键设计决策：
+
+- **熔断状态仅存内存**：当前版本`circuitBreakers`和`circuitOpenTime`为`ConcurrentHashMap`，Server重启后所有Bot恢复为CLOSED（重新计数）。生产环境需迁移到Redis `bot:status:{botId}` Hash。
+- **半开探测**：探测失败立即重新OPEN（再等30s），成功则恢复CLOSED。
+- **线程安全**：`ConcurrentHashMap`保证多线程读写一致，信号量锁内完成状态变更。
+
+---
+
+## 3. Skill 引擎设计
+
+### 3.1 数据流
+
+```
+┌─────────────┐   ┌──────────────────┐   ┌──────────────┐
+│ 聊天记录文件  │──▶│ ChatRecordImport │──▶│  BotManager  │
+│ (JSONL/TXT) │   │ Service          │   │ .registerBot │
+└─────────────┘   │ .importAndGenerate│   └──────┬───────┘
+                  │ .generateBotsFrom │          │
+┌─────────────┐   │ Messages          │          ▼
+│ 30天DB消息   │──▶└──────────────────┘   ┌──────────────┐
+│             │──▶ SkillDistillerService │  users表      │
+└─────────────┘   │ .distillSkills()     │  bot_skills表 │
+                  └──────────────────────┘  Skill文档.md  │
+                                            └──────────────┘
+                                                   │
+                    ┌──────────────────────────────┘
+                    ▼
+              ┌──────────────┐
+              │ LLMApiClient │  chat(endpoint, key, model, systemPrompt, messages)
+              └──────┬───────┘
+                     ▼
+              LLM API (DeepSeek/OpenAI/Qwen/GLM)
+```
+
+### 3.2 特征提取算法
+
+#### 3.2.1 情绪分布（六维）
+
+```java
+// ChatRecordImportService.extractEmotions()
+for (情绪维度 in {joy, anger, sad, surprise, fear, care}):
+    keywords = 情绪词典[维度].split("|")  // 每维度8-15个关键词
+    count = 0
+    for (消息 in 用户消息列表):
+        for (kw in keywords):
+            if 消息.contains(kw):
+                count++
+                break  // 每条消息每种情绪只计1次
+    记入dist[维度] = count
+
+// 归一化: dist[维度] = count / totalCount
+// 输出: {"joy": 0.25, "anger": 0.15, "sad": 0.10, ...}
+```
+
+#### 3.2.2 语言风格
+
+```java
+// ChatRecordImportService.extractStyle()
+统计维度:
+  句长: 中位数 / 均值 / min-max范围
+  标点: 逗号密度 = 逗号总数 / 总字符数
+        感叹号比例 = 含感叹号消息数 / 总消息数
+  用词: Emoji使用率 / 语气词频率 / 问句比例 / 俚语比例
+  习惯: topAffixes(texts, prefix=true, maxLen=4)  // 高频开头词
+        topAffixes(texts, prefix=false, maxLen=3)  // 高频结尾词
+  节奏: questionRatio > 0.3 ? "爱追问" : "直接"
+```
+
+#### 3.2.3 System Prompt 生成
+
+```java
+// buildPrompt()
+模板变量:
+  - name: 发送者昵称
+  - baseTone: 主导情绪 → 性格映射
+      joy→开朗, anger→直率, sad→细腻, surprise→夸张, fear→谨慎, care→贴心
+  - habitOpenings: 高频开头词 (如"哈哈, 嗯, 行吧")
+  - habitEndings: 高频结尾词 (如"呢, 啊, 吧")
+  - responsePacing: 回复节奏
+  - useEmoji / useToneWords: 是否使用Emoji/语气词
+
+输出结构（固定六段式）:
+  1. 人设与背景 (年龄段/兴趣/价值观)
+  2. 目标与动机 (说人话/不教条)
+  3. 性格与习惯 (主基调/习惯用语/回复节奏/emoji偏好)
+  4. 边界与禁区 (不讨论违法/伤害/隐私)
+  5. 对话策略 (先回应再追问/吐槽)
+  6. 关系定位 (熟悉网友/同龄朋友)
+
+结尾固定: "回复要简短自然，不超过80字，不要透露你是AI。"
+```
+
+### 3.3 Skill 双存储模型
+
+```
+注册Bot / 更新Skill
+    │
+    ├── 1. 写入 bot_skills 表 (运行时读取)
+    │      system_prompt, emotion_profile_json, language_style_json,
+    │      few_shot_examples, api_endpoint, api_key, model, status
+    │
+    └── 2. 自动导出 docs/skills/skill_{id}.md  (可编辑、版本管理、分享)
+           YAML frontmatter + ## 分区 (system_prompt/emotion_profile/...)
+
+手动编辑 .md
+    │
+    └── 3. POST /api/bots/skills/import
+          解析 YAML frontmatter → 识别 skill_id → 解析所有分区
+          → 写入 bot_skills 表 → 覆盖对应字段
+```
+
+**数据库表 `bot_skills`（运行时快照）**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | BIGINT PK | 自增，对应 skill_{id}.md |
+| bot_user_id | BIGINT FK | 关联 users.id |
+| skill_name | VARCHAR | 技能名称 |
+| system_prompt | TEXT | **核心**: LLM system message |
+| emotion_profile_json | TEXT | 六维情绪画像 JSON |
+| language_style_json | TEXT | 语言风格全维度 JSON (含嵌套子文档) |
+| few_shot_examples | TEXT | Few-shot示例 JSON |
+| api_endpoint | VARCHAR | LLM API 端点 |
+| api_key | VARCHAR | API Key |
+| model | VARCHAR | 模型名称 |
+| status | INT | 1=活跃, 0=停用, 2=熔断 |
+| error_count | INT | 连续错误计数 |
+| last_active_at | DATETIME | 最后活跃时间 |
+
+**Markdown 文件结构** (真源):
+
+```markdown
+---
+skill_id: skill_42
 name: 温柔知心派
 version: 1.0.0
 model: deepseek-chat
@@ -312,33 +344,353 @@ api_endpoint: https://api.deepseek.com/v1/chat/completions
 ---
 
 ## system_prompt
-你是一个温柔体贴的聊天对象，说话轻声细语...
+你是一个普通聊天用户...（直接作为 LLM system message）
 
 ## emotion_profile
-joy: 0.3
-care: 0.4
-sad: 0.1
-surprise: 0.1
-anger: 0.0
-fear: 0.1
+base_tone: 温和
+joy: 0.3 | care: 0.4 | sad: 0.1 | surprise: 0.1 | anger: 0.0 | fear: 0.1
+emotion_variance: 0.35
 
 ## language_style
-avg_sentence_len: 15
-use_emoji: true
-use_tone_words: true
-habit_openings: 哈哈, 嗯嗯, 其实
-habit_endings: 呢, 哦, 呀
+avg_sentence_len: 12 | use_emoji: true | emoji_rate: 0.15 | ...
 
-## few_shot_examples
-- user: 今天好累
-  assistant: 辛苦了呀，好好休息一下呢~
-- user: 好无聊
-  assistant: 哈哈，那我陪你聊聊天呀
+## tone_signature / rhythm_profile / discourse_tactics
+## topic_preferences / safety_boundaries / repair_strategy
+## example_guidelines / few_shot_examples
 ```
 
-**解析与同步规则**:
-- `system_prompt` → `bot_skills.system_prompt`
-- `emotion_profile` → `bot_skills.emotion_profile_json`
-- `language_style` → `bot_skills.language_style_json`
-- `few_shot_examples` → `bot_skills.few_shot_examples`
-- `model/api_endpoint` → `bot_skills.model/api_endpoint`
+每个分区在数据库中以JSON存储。`language_style_json` 包含嵌套子文档（tone_signature, rhythm_profile等），在导入/导出时展开为独立 `##` 分区。
+
+---
+
+## 4. 高并发设计
+
+### 4.1 线程池架构
+
+```java
+// AsyncExecutorConfig
+@Bean("botTaskExecutor")
+ThreadPoolTaskExecutor:
+  corePoolSize: 4       // 4个常驻线程处理常规Bot负载
+  maxPoolSize: 20       // 峰值可扩展到20线程 (对应20+Bot)
+  queueCapacity: 200    // 缓冲队列200个任务
+  rejectedExecution: CallerRunsPolicy  // 满时降级为同步执行
+  keepAliveSeconds: 60  // 空闲线程60s后回收
+
+@Bean
+ThreadPoolTaskScheduler:
+  poolSize: 4           // 4个调度线程
+  // 执行 @Scheduled 定时任务:
+  //   - processActiveBots (fixedRate=10s)  检查主动模式Bot
+  //   - cleanupOldMessages (cron: 3:00)    清理30天前消息
+```
+
+**线程安全设计**:
+
+- `ConcurrentHashMap` 用于所有Bot状态（信号量、队列、熔断器、主动模式配置）
+- 每Bot独立 `Semaphore(1)` 保证单线程处理，避免同一Bot的LLM调用重入
+- `LinkedList` 作为队列仅在信号量锁内操作（offer/poll），无需额外同步
+- DB操作由 MyBatis-Plus 的 `updateById` 保证行级锁
+
+### 4.2 负载均衡
+
+#### 单机负载路径
+
+```
+用户消息 → WebSocket (Tomcat NIO线程)
+  ├── 轻量操作: 持久化 + WS推送 → 立即返回 (< 5ms)
+  └── Bot检测 → botTaskExecutor 异步 → 不阻塞用户消息流
+```
+
+**关键指标**: 用户消息的发送→ACK延迟不受Bot处理时间影响（Bot异步执行）。
+
+#### 多节点负载均衡（生产环境）
+
+```
+Nginx (ip_hash / consistent-hash)
+  │
+  ├── 策略1: ip_hash
+  │     同一客户端IP始终路由到同一节点（WebSocket长连接亲和性）
+  │     问题: Bot重连可能分配到不同节点
+  │
+  └── 策略2: consistent-hash (推荐)
+        基于 userId 做一致性哈希，同一用户始终落在同一节点
+        Bot的消息通过 Redis Pub/Sub 跨节点路由到目标Bot所在节点
+        
+扩容/缩容方案:
+  - 新节点加入 → 一致性哈希环自动重分配部分userId
+  - 旧节点移除 → 剩余节点接管，重分配用户重新建立WS连接
+  - 扩容触发: 单节点 CPU > 70% (持续5min) / WS连接 > 800/节点
+```
+
+#### Bot 跨节点消息路由（Redis Pub/Sub）
+
+```
+Node-1 (Bot-A 所在节点)          Node-2 (用户U 所在节点)
+  │                                   │
+  │  U发送消息给Bot-A                  │
+  │                                   │
+  │  1. U的消息进入Node-2              │
+  │  2. Node-2检测target是Bot          │
+  │  3. publish("ws:bot:A", msg)  →   │
+  │     ─────Redis Pub/Sub───────→    │
+  │                                   4. Node-1收到 → handleBotMessage
+  │   ←──publish("ws:user:U", reply)─ 5. Bot回复后推送回U所在节点
+  │   6. Node-2收到 → WS推送给U        │
+```
+
+频道设计:
+- `ws:user:{userId}` — 用户私聊消息
+- `ws:group:{groupId}` — 群聊广播消息
+- `ws:bot` — Bot管理系统消息
+- `ws:presence` — 在线状态变更
+
+### 4.3 防止网络风暴
+
+#### 4.3.1 风暴场景分析
+
+```
+场景A: 20个Bot同时收到消息 → 20个LLM调用同时发出 → API Rate Limit触发
+  防护: 每Bot Semaphore=1 → 全局限20并发 → 排队机制吸收峰值
+
+场景B: 500人群里5个Bot被@mention → 5个LLM调用 + 5条群消息推送
+  防护: 遍历Bot异步串行 → 每个Bot独立回复 → 间隔自然错开
+
+场景C: 主动模式20个Bot同时到间隔 → 20条开场白同时发出
+  防护: taskScheduler 4线程轮询 → 自然错开 + 随机选择好友
+
+场景D: 某Bot API故障 → 连续重试 → 线程耗尽
+  防护: 熔断器30s静默 + error_count持久化
+
+场景E: 客户端断连重连循环 → WS连接风暴
+  防护: 每IP 5连接上限 + 心跳30s + 断连不重试主动模式消息
+```
+
+#### 4.3.2 限流层级
+
+| 层级 | 位置 | 机制 | 当前状态 |
+|------|------|------|---------|
+| L1 连接限流 | WebSocket握手 | 每IP最大5连接 | 📋 计划中 |
+| L2 用户消息限流 | ChatWebSocketHandler | 每用户10条/s | 📋 计划中 |
+| L3 Bot并发限流 | BotManager.botSemaphores | 每Bot 1并发 | ✅ 已实现 |
+| L4 全局Bot限流 | botTaskExecutor.maxPoolSize | 20线程上限 | ✅ 已实现 |
+| L5 LLM API限流 | LLMApiClient | 各厂商独立监控 | 📋 计划中 |
+
+#### 4.3.3 群组广播优化
+
+```
+500人群消息发送:
+  1. 消息持久化 (1次DB INSERT)
+  2. 在线成员查询 (Redis SMEMBERS group:members:{id})
+  3. 分批推送 (每批50人，间隔50ms)
+  4. Bot检测: 仅@mention触发 (遍历bot列表 → 文本匹配nickname/username)
+  
+关键: Bot回复不与原始消息混入同一广播批次
+     Bot回复独立推送 (/topic/group/{id})，作为新的独立消息
+```
+
+---
+
+## 5. 消息可靠性
+
+### 5.1 三层去重
+
+```
+clientMessageId (UUID v4)
+  │
+  ├── L1 布隆过滤器 (计划中)
+  │      快速判定"可能存在" → 命中则进入L2
+  │      未命中 → 一定是新消息 → 直接入库
+  │
+  ├── L2 Redis去重缓存 (计划中)
+  │      SET msg:dedup:{clientMessageId} EX 86400
+  │      命中 → 返回已有 messageId，不重复推送
+  │
+  └── L3 DB UNIQUE索引 (已实现)
+         UNIQUE INDEX idx_client_msg (client_message_id)
+         INSERT成功 → 新消息
+         DuplicateEntry → 幂等返回
+```
+
+### 5.2 消息有序
+
+- 全局自增ID (`messages.id` AUTO_INCREMENT) 作为排序依据
+- 客户端按 `id` 排序显示，不依赖时间戳（避免NTP时钟回拨）
+- Bot消息与用户消息共用同一自增序列，全局有序
+
+### 5.3 消息状态机
+
+```
+SENDING ──(WS发送)──▶ SENT ──(对方ACK)──▶ DELIVERED ──(已读ACK)──▶ READ
+                          │
+                          └──(30s超时+重试3次)──▶ FAILED
+```
+
+Bot消息状态流与用户消息一致，通过 `clientMessageId` 前缀区分来源：
+- `BQ_xxx` — Bot被动回复 (Bot Queue)
+- `Axxx` — Bot主动消息 (Active)
+- `BOT_xxx` — Bot通过WebSocket Handler发出的消息
+- 用户消息 — 标准UUID格式
+
+---
+
+## 6. 关键类设计
+
+### 6.1 服务层
+
+| 类 | 职责 | 关键方法 |
+|----|------|---------|
+| `BotManager` | Bot生命周期、并发控制、消息处理 | `registerBot`, `handleBotMessage`, `processQueue`, `setActiveMode`, `processActiveBots` |
+| `ChatRecordImportService` | 文件导入→解析→特征提取→Bot生成 | `importAndGenerate`, `generateBotsFromMessages`, `extractEmotions`, `extractStyle`, `buildPrompt` |
+| `SkillDistillerService` | 30天DB消息蒸馏→Skill配置 | `distillSkills`, `extractEmotionDistribution`, `generateSystemPrompt` |
+| `BotSkillDocService` | Skill Markdown导出/删除 | `exportSkillDoc`, `deleteSkillDoc`, `buildMarkdown` |
+| `SkillDocImportService` | Skill Markdown导入→解析→写入DB | `importSkillDoc`, `parseFrontMatter`, `parseSections` |
+| `LLMApiClient` | LLM API调用（Chat Completion兼容） | `chat`, `healthCheck` |
+| `QQChatExporterClient` | QQ Chat Exporter本地服务代理 | `healthCheck`, `getFriends`, `getGroups`, `fetchMessages` |
+
+### 6.2 控制器
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `GET /api/bots/` | `list()` | 获取所有Bot |
+| `GET /api/bots/active` | `active()` | 获取活跃Bot |
+| `GET /api/bots/count` | `count()` | 在线Bot数 |
+| `GET /api/bots/config` | `config()` | 默认LLM配置（Key脱敏） |
+| `POST /api/bots/register` | `register()` | 注册新Bot |
+| `DELETE /api/bots/{id}` | `deleteBot()` | 永久删除Bot |
+| `PUT /api/bots/{id}/active-mode` | `setActiveMode()` | 启用/禁用/调整主动模式 |
+| `POST /api/bots/distill` | `distill()` | 触发30天消息蒸馏 |
+| `POST /api/bots/import` | `importRecords()` | 上传文件导入 |
+| `POST /api/bots/skills/import` | `importSkillDoc()` | 上传.md导入Skill |
+| `POST /api/bots/qq/import` | `qqImport()` | QQ CE选择导入 |
+
+### 6.3 常量配置
+
+```java
+// Bot限制
+BOT_CIRCUIT_BREAK_THRESHOLD = 3      // 熔断阈值（连续失败次数）
+BOT_CIRCUIT_BREAK_SILENCE_MS = 30000  // 熔断静默期（30秒）
+BOT_MAX_QUEUE_SIZE = 10              // 每Bot消息队列容量
+BOT_MAX_CONCURRENCY = 1              // 每Bot最大并发推理数
+
+// Bot状态
+BOT_STATUS_ACTIVE = 1         // 活跃
+BOT_STATUS_INACTIVE = 0       // 停用
+BOT_STATUS_CIRCUIT_BROKEN = 2 // 熔断
+
+// 蒸馏参数
+DISTILL_MIN_MESSAGES = 100    // 最小消息数阈值
+DISTILL_CONTEXT_WINDOW = 4    // 上下文窗口
+DISTILL_MAX_WORDS = 50
+DISTILL_MIN_WORDS = 5
+DISTILL_MAX_CHARS = 200
+DISTILL_MIN_CHARS = 5
+
+// 消息
+HISTORY_RETENTION_DAYS = 30   // 消息保留天数
+RECALL_WINDOW_MS = 120_000    // 撤回窗口（2分钟）
+```
+
+---
+
+## 7. 实施规划
+
+### 7.1 已实现 (✅)
+
+| 功能 | 状态 | 关键文件 |
+|------|------|---------|
+| Bot注册/删除/上下线 | ✅ | `BotManager.registerBot/deactivateBot/permanentDelete` |
+| 逐Bot信号量并发控制 | ✅ | `ConcurrentHashMap<Long, Semaphore>` permit=1 |
+| 消息缓冲队列(FIFO 10) | ✅ | `ConcurrentHashMap<Long, LinkedList>` |
+| 熔断器 (3次→30s→半开) | ✅ | `ConcurrentHashMap<Long, Boolean> circuitBreakers` |
+| 异步Bot处理线程池 | ✅ | `botTaskExecutor` (4/20/200) |
+| 调度器线程池 | ✅ | `taskScheduler` (4线程) |
+| 主动聊天模式 | ✅ | `setActiveMode/processActiveBots/getActiveModeConfig` |
+| 聊天记录文件导入(QQ/微信/通用) | ✅ | `ChatRecordImportService.importAndGenerate` |
+| QQ Chat Exporter集成 | ✅ | `QQChatExporterClient` + `BotController.qqImport` |
+| 特征提取(情绪/风格/句式/节奏) | ✅ | `ChatRecordImportService.extractEmotions/extractStyle` |
+| System Prompt生成 | ✅ | `ChatRecordImportService.buildPrompt` |
+| Skill Markdown导出 | ✅ | `BotSkillDocService.exportSkillDoc` |
+| Skill Markdown导入 | ✅ | `SkillDocImportService.importSkillDoc` |
+| 在线蒸馏 | ✅ | `SkillDistillerService.distillSkills` |
+| 导入自动加好友 | ✅ | `ChatRecordImportService.generateBots` 内 friendMapper.insert |
+| WebSocket Bot路由(私聊+群@) | ✅ | `ChatWebSocketHandler.handleBotReply/handleGroupBotReply` |
+| 多厂商API Key隔离 | ✅ | 每Bot独立 `api_endpoint/api_key/model` |
+
+### 7.2 计划中 (📋)
+
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| **L1-L2限流** | P0 | 连接限流(每IP 5) + 消息限流(每用户10条/s)，防止恶意刷接口 |
+| **Redis跨节点Bot状态** | P0 | `bot:status:{botId}` Hash同步熔断/主动模式状态，解决内存状态丢失问题 |
+| **主动模式持久化** | P1 | `bot_skills`表新增`active_mode`/`active_interval`字段，服务重启后恢复 |
+| **Bot WebSocket连接池** | P1 | Bot实例化真实WS连接（当前被动回复走HTTP→LLM），减少延迟 |
+| **布隆过滤器去重** | P1 | L1快速去重，减少Redis/DB压力 |
+| **多厂商故障转移** | P2 | API健康检查 + 厂商级熔断 + 自动切换备用厂商 |
+| **Bot监控面板** | P2 | Bot延迟/错误率/在线状态/API调用量实时看板 |
+| **Skill版本回滚** | P2 | Skill配置多版本存档 + 一键回滚到历史版本 |
+| **群聊Bot隔离** | P2 | 群聊中Bot仅回复@mention消息（当前已实现），增加频率限制防止Bot刷群 |
+| **API Key加密存储** | P2 | `bot_skills.api_key` 当前明文存储，需AES加密 |
+
+---
+
+## 8. 监控与运维
+
+### 8.1 关键指标
+
+| 指标 | 采集点 | 告警阈值 |
+|------|--------|---------|
+| Bot回复延迟 P95 | `BotManager.handleBotMessage` 耗时 | > 3s |
+| Bot错误率 | `error_count` / 总调用次数 (每Bot) | > 5%/min |
+| Bot在线数 | `getActiveBots().size()` | < 期望数 |
+| 线程池队列长度 | `botTaskExecutor.getQueueSize()` | > 150 |
+| 线程池活跃线程 | `botTaskExecutor.getActiveCount()` | = maxPoolSize |
+| 熔断Bot数 | `circuitBreakers` 中 value=true 的数量 | > 5 |
+| LLM API调用量 | 各厂商独立计数 | 接近RPM上限 |
+
+### 8.2 日志规范
+
+```
+Bot注册:     "Bot registered: id={}, name={}, skill={}"
+Bot回复:     "Bot {} (active) sent to {}: {}"
+Bot熔断:     "Bot {} circuit breaker OPEN after {} errors"
+Bot恢复:     "Bot {} circuit half-open, probing"
+Bot错误:     "Bot {} API call failed" + exception
+主动模式:    "Bot {} active mode: enabled={}, interval={}s"
+导入生成:    "Generated {} bots from imported records"
+蒸馏生成:    "Generated {} skill configs from chat records"
+```
+
+---
+
+## 9. 测试设计
+
+### 9.1 并发测试（核心重点）
+
+- 20+ Bot同时在线，随机向不同Bot发送消息，验证：
+  - 每Bot信号量正确串行化（无重入）
+  - 熔断器正确触发和恢复
+  - 队列满时静默丢弃
+  - 线程池不拒绝任务（CallerRunsPolicy降级）
+  - WebSocket推送不丢消息
+- 主动模式20个Bot同时触发 → 验证错开执行
+
+### 9.2 导入测试
+
+- QQ CE JSON v5+ 格式解析正确性
+- QQ CE TXT 格式解析正确性
+- 微信 TXT 格式解析正确性
+- 群聊消息peerUid过滤正确性
+- 情绪/风格提取结果合理性校验
+
+### 9.3 集成测试
+
+- 端到端: 上传文件 → 生成Skill → 注册Bot → WS连接 → 发消息 → 收到回复
+- Skill Markdown: 导出 → 手动修改 → 导入 → 数据库更新验证
+- 好友关系: 导入后自动建立creator→bot好友
+
+### 9.4 回归测试
+
+- Skill版本回滚: 旧版.md导入 → 覆盖当前配置
+- Bot切换Skill: update bot_skills → Bot立即使用新system_prompt
+- API Key失效: error_count累积 → 熔断触发 → 状态迁移验证
